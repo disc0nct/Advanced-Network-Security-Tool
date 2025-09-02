@@ -1,5 +1,7 @@
 # Advanced Network Security Tool
 
+The Advanced Network Security Tool is a Bash script that provides an interactive, menu-driven interface for common penetration testing tasks. It brings together tools like nmap, masscan, tcpdump, ettercap, aircrack-ng, and hashcat into one place, making it easier to perform network scanning, sniffing, MITM testing, wireless attacks, and password audits on authorized networks.
+
 > **Warning:** This tool is intended **only** for authorized security testing on networks you own or have explicit permission to test. Unauthorized access, disruption, or interception of networks or devices is illegal and unethical. Read the **Security & Legal** section below before using.
 
 ---
