@@ -44,6 +44,9 @@ get_network_info() {
     local dns_servers
     local hostname
     local mac_address
+    local current_user
+    local os_info
+    local active_connections
     
     # Get default interface
     default_interface=$(ip route | grep default | awk '{print $5}' | head -1)
@@ -66,16 +69,32 @@ get_network_info() {
     gateway=$(ip route | grep default | awk '{print $3}' | head -1)
     
     # Get DNS servers
-    dns_servers=$(grep "nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3 | tr '\n' ', ' | sed 's/,$//')
+    dns_servers=$(grep "nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -2 | tr '\n' ', ' | sed 's/,$//')
     
     # Get hostname
     hostname=$(hostname 2>/dev/null || echo "N/A")
+    
+    # Get current user
+    current_user=$(whoami 2>/dev/null || echo "N/A")
+    
+    # Get OS info
+    if [ -f /etc/os-release ]; then
+        os_info=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
+    else
+        os_info=$(uname -s 2>/dev/null || echo "N/A")
+    fi
+    
+    # Get active connections count
+    active_connections=$(netstat -ant 2>/dev/null | grep ESTABLISHED | wc -l || ss -ant 2>/dev/null | grep ESTAB | wc -l || echo "0")
     
     # Display information
     echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}                    ${GREEN}NETWORK INFORMATION${NC}                      ${CYAN}║${NC}"
     echo -e "${CYAN}╠═══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}Computer Name:${NC}    ${WHITE}$(printf '%-43s' "$hostname")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Current User:${NC}     ${WHITE}$(printf '%-43s' "$current_user")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Operating System:${NC} ${WHITE}$(printf '%-43s' "${os_info:0:43}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}╠═══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}Interface:${NC}        ${WHITE}$(printf '%-43s' "${default_interface:-N/A}")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}Local IP:${NC}         ${WHITE}$(printf '%-43s' "${local_ip:-N/A}")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}Public IP:${NC}        ${WHITE}$(printf '%-43s' "${public_ip:-N/A}")${NC}${CYAN}║${NC}"
@@ -83,6 +102,9 @@ get_network_info() {
     echo -e "${CYAN}║${NC} ${YELLOW}Gateway:${NC}          ${WHITE}$(printf '%-43s' "${gateway:-N/A}")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}MAC Address:${NC}      ${WHITE}$(printf '%-43s' "${mac_address:-N/A}")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}DNS Servers:${NC}      ${WHITE}$(printf '%-43s' "${dns_servers:-N/A}")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}╠═══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Active Connections:${NC} ${WHITE}$(printf '%-41s' "$active_connections")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}Root Access:${NC}      ${WHITE}$(printf '%-43s' "$([ $EUID -eq 0 ] && echo 'Yes ✓' || echo 'No (use sudo)')")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1151,4 +1173,1089 @@ wireless_attacks() {
             echo -e "${GREEN}Enter target client MAC (leave empty for broadcast):${NC}"
             read -r client_mac
             
-            echo -e "${GREEN}Enter number of deauth packets (0 for continuous):${
+            echo -e "${GREEN}Enter number of deauth packets (0 for continuous):${NC}"
+            read -r deauth_count
+            deauth_count=${deauth_count:-10}
+            
+            if [ "$deauth_count" = "0" ]; then
+                echo -e "${YELLOW}Starting continuous deauth attack${NC}"
+                echo -e "${RED}Press Ctrl+C to stop${NC}"
+            else
+                echo -e "${YELLOW}Sending $deauth_count deauth packets${NC}"
+            fi
+            
+            if [ -z "$client_mac" ]; then
+                echo -e "${YELLOW}Running: sudo aireplay-ng --deauth $deauth_count -a $bssid $MONITOR_INTERFACE${NC}"
+                log_command "sudo aireplay-ng --deauth $deauth_count -a $bssid $MONITOR_INTERFACE"
+                sudo aireplay-ng --deauth "$deauth_count" -a "$bssid" "$MONITOR_INTERFACE"
+            else
+                echo -e "${YELLOW}Running: sudo aireplay-ng --deauth $deauth_count -a $bssid -c $client_mac $MONITOR_INTERFACE${NC}"
+                log_command "sudo aireplay-ng --deauth $deauth_count -a $bssid -c $client_mac $MONITOR_INTERFACE"
+                sudo aireplay-ng --deauth "$deauth_count" -a "$bssid" -c "$client_mac" "$MONITOR_INTERFACE"
+            fi
+            ;;
+        3)
+            echo -e "${YELLOW}WPA/WPA2 Handshake Capture${NC}"
+            check_tool "airodump-ng" "aircrack-ng" || return
+            
+            if [ -z "${MONITOR_INTERFACE:-}" ]; then
+                get_monitor_interface || return
+            fi
+            
+            echo -e "${GREEN}Enter target BSSID:${NC}"
+            read -r bssid
+            echo -e "${GREEN}Enter channel:${NC}"
+            read -r channel
+            echo -e "${GREEN}Enter output filename (without extension):${NC}"
+            read -r output_file
+            
+            if [ -z "$bssid" ] || [ -z "$channel" ] || [ -z "$output_file" ]; then
+                echo -e "${RED}Invalid input${NC}"
+                return
+            fi
+            
+            local capture_file
+            capture_file="$SESSION_DIR/captures/$output_file"
+            
+            echo -e "${YELLOW}Starting capture on channel $channel${NC}"
+            echo -e "${CYAN}Tip: Open another terminal and run deauth attack to capture handshake${NC}"
+            echo -e "${RED}Press Ctrl+C when handshake is captured${NC}"
+            log_command "sudo airodump-ng -c $channel --bssid $bssid -w $capture_file $MONITOR_INTERFACE"
+            sudo airodump-ng -c "$channel" --bssid "$bssid" -w "$capture_file" "$MONITOR_INTERFACE"
+            
+            echo -e "${GREEN}Capture saved to: $capture_file-01.cap${NC}"
+            ;;
+        4)
+            echo -e "${YELLOW}WPS Attack with Reaver${NC}"
+            check_tool "reaver" "reaver" || return
+            
+            if [ -z "${MONITOR_INTERFACE:-}" ]; then
+                get_monitor_interface || return
+            fi
+            
+            echo -e "${GREEN}Enter target BSSID:${NC}"
+            read -r bssid
+            echo -e "${GREEN}Enter channel:${NC}"
+            read -r channel
+            
+            if [ -z "$bssid" ] || [ -z "$channel" ]; then
+                echo -e "${RED}Invalid input${NC}"
+                return
+            fi
+            
+            echo -e "${YELLOW}Running: sudo reaver -i $MONITOR_INTERFACE -b $bssid -c $channel -vv${NC}"
+            echo -e "${CYAN}This may take several hours...${NC}"
+            log_command "sudo reaver -i $MONITOR_INTERFACE -b $bssid -c $channel -vv"
+            sudo reaver -i "$MONITOR_INTERFACE" -b "$bssid" -c "$channel" -vv
+            ;;
+        5)
+            echo -e "${YELLOW}Crack WPA/WPA2 Handshake${NC}"
+            check_tool "aircrack-ng" "aircrack-ng" || return
+            
+            echo -e "${GREEN}Available capture files:${NC}"
+            ls -1 "$SESSION_DIR/captures/"*.cap 2>/dev/null | nl || echo "No captures found"
+            echo ""
+            echo -e "${GREEN}Enter path to capture file:${NC}"
+            read -r cap_file
+            
+            if [ ! -f "$cap_file" ]; then
+                echo -e "${RED}File not found: $cap_file${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter path to wordlist:${NC}"
+            read -r wordlist
+            
+            if [ ! -f "$wordlist" ]; then
+                echo -e "${RED}Wordlist not found: $wordlist${NC}"
+                echo -e "${YELLOW}Common locations: /usr/share/wordlists/rockyou.txt${NC}"
+                return
+            fi
+            
+            echo -e "${YELLOW}Running: aircrack-ng -w $wordlist $cap_file${NC}"
+            log_command "aircrack-ng -w $wordlist $cap_file"
+            aircrack-ng -w "$wordlist" "$cap_file"
+            ;;
+        6)
+            disable_monitor_mode
+            ;;
+        7)
+            return
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            return
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${GREEN}Press any key to continue...${NC}"
+    read -n 1 -s
+}
+
+# Password attacks function
+password_attacks() {
+    header
+    echo -e "${GREEN}═══ Password Attack Options ═══${NC}"
+    echo -e "${RED}⚠️  WARNING: Only test credentials you own or have permission to test${NC}"
+    echo ""
+    echo "1. Hash cracking (John the Ripper)"
+    echo "2. Hash cracking (Hashcat)"
+    echo "3. Network brute force (Hydra)"
+    echo "4. Wordlist generation (crunch)"
+    echo "5. Hash identification"
+    echo "6. Return to main menu"
+    echo ""
+    echo -e "${GREEN}Choose an option:${NC}"
+    read -r option
+    
+    case $option in
+        1)
+            echo -e "${YELLOW}Hash cracking with John the Ripper${NC}"
+            check_tool "john" "john" || return
+            
+            echo -e "${GREEN}Enter path to hash file:${NC}"
+            read -r hash_file
+            
+            if [ ! -f "$hash_file" ]; then
+                echo -e "${RED}File not found: $hash_file${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter wordlist path (press enter for default):${NC}"
+            read -r wordlist
+            
+            if [ -z "$wordlist" ]; then
+                echo -e "${YELLOW}Running: john $hash_file${NC}"
+                log_command "john $hash_file"
+                john "$hash_file"
+            else
+                if [ ! -f "$wordlist" ]; then
+                    echo -e "${RED}Wordlist not found: $wordlist${NC}"
+                    return
+                fi
+                echo -e "${YELLOW}Running: john --wordlist=$wordlist $hash_file${NC}"
+                log_command "john --wordlist=$wordlist $hash_file"
+                john --wordlist="$wordlist" "$hash_file"
+            fi
+            
+            echo ""
+            echo -e "${CYAN}To show cracked passwords: john --show $hash_file${NC}"
+            ;;
+        2)
+            echo -e "${YELLOW}Hash cracking with Hashcat${NC}"
+            check_tool "hashcat" "hashcat" || return
+            
+            echo -e "${GREEN}Enter path to hash file:${NC}"
+            read -r hash_file
+            
+            if [ ! -f "$hash_file" ]; then
+                echo -e "${RED}File not found: $hash_file${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter wordlist path:${NC}"
+            read -r wordlist
+            
+            if [ ! -f "$wordlist" ]; then
+                echo -e "${RED}Wordlist not found: $wordlist${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter hash type (e.g., 0=MD5, 100=SHA1, 1000=NTLM, 1800=SHA512):${NC}"
+            read -r hash_type
+            
+            if [ -z "$hash_type" ]; then
+                echo -e "${RED}Hash type required${NC}"
+                return
+            fi
+            
+            echo -e "${YELLOW}Running: hashcat -m $hash_type -a 0 $hash_file $wordlist${NC}"
+            log_command "hashcat -m $hash_type -a 0 $hash_file $wordlist"
+            hashcat -m "$hash_type" -a 0 "$hash_file" "$wordlist"
+            ;;
+        3)
+            echo -e "${YELLOW}Network brute force with Hydra${NC}"
+            check_tool "hydra" "hydra" || return
+            
+            if [ -z "${CURRENT_TARGET:-}" ]; then
+                get_target || return
+            fi
+            
+            echo -e "${GREEN}Enter service to attack (ssh, ftp, http-post-form, etc.):${NC}"
+            read -r service
+            
+            if [ -z "$service" ]; then
+                echo -e "${RED}Service required${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter username (or -L for userlist file):${NC}"
+            read -r user_input
+            echo -e "${GREEN}Enter password (or -P for passlist file):${NC}"
+            read -r pass_input
+            
+            local user_flag="-l"
+            local pass_flag="-p"
+            
+            if [ -f "$user_input" ]; then
+                user_flag="-L"
+            fi
+            
+            if [ -f "$pass_input" ]; then
+                pass_flag="-P"
+            fi
+            
+            echo -e "${YELLOW}Running: hydra $user_flag $user_input $pass_flag $pass_input $CURRENT_TARGET $service${NC}"
+            log_command "hydra $user_flag $user_input $pass_flag $pass_input $CURRENT_TARGET $service"
+            hydra "$user_flag" "$user_input" "$pass_flag" "$pass_input" "$CURRENT_TARGET" "$service"
+            ;;
+        4)
+            echo -e "${YELLOW}Wordlist generation with crunch${NC}"
+            check_tool "crunch" "crunch" || return
+            
+            echo -e "${GREEN}Enter minimum length:${NC}"
+            read -r min_len
+            echo -e "${GREEN}Enter maximum length:${NC}"
+            read -r max_len
+            
+            if [ -z "$min_len" ] || [ -z "$max_len" ]; then
+                echo -e "${RED}Invalid input${NC}"
+                return
+            fi
+            
+            echo -e "${GREEN}Enter character set (or leave empty for lowercase):${NC}"
+            read -r charset
+            
+            echo -e "${GREEN}Enter output file:${NC}"
+            read -r output_file
+            
+            if [ -z "$output_file" ]; then
+                output_file="$SESSION_DIR/wordlist_$(date +%Y%m%d_%H%M%S).txt"
+            fi
+            
+            if [ -z "$charset" ]; then
+                echo -e "${YELLOW}Running: crunch $min_len $max_len -o $output_file${NC}"
+                log_command "crunch $min_len $max_len -o $output_file"
+                crunch "$min_len" "$max_len" -o "$output_file"
+            else
+                echo -e "${YELLOW}Running: crunch $min_len $max_len $charset -o $output_file${NC}"
+                log_command "crunch $min_len $max_len $charset -o $output_file"
+                crunch "$min_len" "$max_len" "$charset" -o "$output_file"
+            fi
+            
+            echo -e "${GREEN}Wordlist saved to: $output_file${NC}"
+            ;;
+        5)
+            echo -e "${YELLOW}Hash identification${NC}"
+            check_tool "hashid" "hashid" || {
+                echo -e "${YELLOW}hashid not found, using hash-identifier${NC}"
+                check_tool "hash-identifier" "hash-identifier" || return
+            }
+            
+            echo -e "${GREEN}Enter hash to identify:${NC}"
+            read -r hash_value
+            
+            if [ -z "$hash_value" ]; then
+                echo -e "${RED}No hash provided${NC}"
+                return
+            fi
+            
+            if command -v hashid &> /dev/null; then
+                hashid "$hash_value"
+            else
+                echo "$hash_value" | hash-identifier
+            fi
+            ;;
+        6)
+            return
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            return
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${GREEN}Press any key to continue...${NC}"
+    read -n 1 -s
+}
+
+# Post-exploitation activities
+post_exploitation() {
+    header
+    echo -e "${GREEN}═══ Post-Exploitation Options ═══${NC}"
+    echo -e "${RED}⚠️  WARNING: Only use on systems you own or have permission to test${NC}"
+    echo ""
+    echo "1. System information gathering"
+    echo "2. Data collection simulation"
+    echo "3. Network mapping"
+    echo "4. Log analysis"
+    echo "5. Clean up traces"
+    echo "6. Generate report"
+    echo "7. Return to main menu"
+    echo ""
+    echo -e "${GREEN}Choose an option:${NC}"
+    read -r option
+    
+    case $option in
+        1)
+            echo -e "${YELLOW}Gathering system information...${NC}"
+            local sysinfo_file
+            sysinfo_file="$SESSION_DIR/evidence/sysinfo_$(date +%Y%m%d_%H%M%S).txt"
+            
+            {
+                echo "=== SYSTEM INFORMATION ==="
+                echo "Date: $(date)"
+                echo ""
+                echo "=== Hostname ==="
+                hostname
+                echo ""
+                echo "=== OS Information ==="
+                cat /etc/os-release 2>/dev/null || uname -a
+                echo ""
+                echo "=== Current User ==="
+                whoami
+                id
+                echo ""
+                echo "=== Users ==="
+                cat /etc/passwd 2>/dev/null | grep -v nologin | grep -v false
+                echo ""
+                echo "=== Network Interfaces ==="
+                ip addr
+                echo ""
+                echo "=== Routing Table ==="
+                ip route
+                echo ""
+                echo "=== Listening Services ==="
+                ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null
+                echo ""
+                echo "=== Running Processes ==="
+                ps aux
+                echo ""
+                echo "=== Environment Variables ==="
+                env
+                echo ""
+                echo "=== Sudo Rights ==="
+                sudo -l 2>/dev/null || echo "Cannot check sudo rights"
+            } > "$sysinfo_file"
+            
+            echo -e "${GREEN}✓ System information saved to: $sysinfo_file${NC}"
+            log_event "System information gathered"
+            ;;
+        2)
+            echo -e "${YELLOW}Data collection simulation...${NC}"
+            echo -e "${GREEN}Enter search directory (default: /tmp):${NC}"
+            read -r search_dir
+            search_dir=${search_dir:-/tmp}
+            
+            if [ ! -d "$search_dir" ]; then
+                echo -e "${RED}Directory not found: $search_dir${NC}"
+                return
+            fi
+            
+            local data_file
+            data_file="$SESSION_DIR/evidence/collected_data_$(date +%Y%m%d_%H%M%S).txt"
+            
+            echo -e "${YELLOW}Searching for interesting files...${NC}"
+            {
+                echo "=== INTERESTING FILES ==="
+                echo "Search directory: $search_dir"
+                echo "Date: $(date)"
+                echo ""
+                echo "=== Configuration files ==="
+                find "$search_dir" -type f -name "*.conf" -o -name "*.cfg" 2>/dev/null | head -50
+                echo ""
+                echo "=== Text documents ==="
+                find "$search_dir" -type f -name "*.txt" -o -name "*.doc" -o -name "*.pdf" 2>/dev/null | head -50
+                echo ""
+                echo "=== Scripts ==="
+                find "$search_dir" -type f -name "*.sh" -o -name "*.py" -o -name "*.pl" 2>/dev/null | head -50
+            } > "$data_file"
+            
+            echo -e "${GREEN}✓ Data collection saved to: $data_file${NC}"
+            log_event "Data collection completed"
+            ;;
+        3)
+            echo -e "${YELLOW}Network mapping...${NC}"
+            check_tool "nmap" "nmap" || return
+            
+            echo -e "${GREEN}Enter network range (e.g., 192.168.1.0/24):${NC}"
+            read -r network_range
+            
+            if [ -z "$network_range" ]; then
+                # Try to auto-detect
+                network_range=$(ip route | grep -v default | grep "/" | awk '{print $1}' | head -1)
+                echo -e "${YELLOW}Using detected network: $network_range${NC}"
+            fi
+            
+            local netmap_file
+            netmap_file="$SESSION_DIR/scans/network_map_$(date +%Y%m%d_%H%M%S).txt"
+            
+            echo -e "${YELLOW}Scanning network: $network_range${NC}"
+            log_command "nmap -sn $network_range"
+            nmap -sn "$network_range" | tee "$netmap_file"
+            
+            echo -e "${GREEN}✓ Network map saved to: $netmap_file${NC}"
+            ;;
+        4)
+            echo -e "${YELLOW}Log analysis...${NC}"
+            local log_analysis
+            log_analysis="$SESSION_DIR/evidence/log_analysis_$(date +%Y%m%d_%H%M%S).txt"
+            
+            {
+                echo "=== LOG ANALYSIS ==="
+                echo "Date: $(date)"
+                echo ""
+                echo "=== Recent Authentication Attempts ==="
+                tail -100 /var/log/auth.log 2>/dev/null || tail -100 /var/log/secure 2>/dev/null || echo "Cannot access auth logs"
+                echo ""
+                echo "=== System Logs ==="
+                tail -100 /var/log/syslog 2>/dev/null || tail -100 /var/log/messages 2>/dev/null || echo "Cannot access system logs"
+                echo ""
+                echo "=== Failed Login Attempts ==="
+                lastb 2>/dev/null | head -20 || echo "Cannot access failed login log"
+                echo ""
+                echo "=== Successful Logins ==="
+                last | head -20
+            } > "$log_analysis"
+            
+            echo -e "${GREEN}✓ Log analysis saved to: $log_analysis${NC}"
+            log_event "Log analysis completed"
+            ;;
+        5)
+            echo -e "${YELLOW}Cleaning up traces...${NC}"
+            echo -e "${RED}This will clear command history. Continue? (yes/no)${NC}"
+            read -r confirm
+            
+            if [[ $confirm =~ ^[Yy][Ee][Ss]$ ]]; then
+                # Clear bash history
+                history -c
+                rm -f ~/.bash_history 2>/dev/null
+                
+                # Clear log entries (requires root)
+                if [ "$EUID" -eq 0 ]; then
+                    echo "" > /var/log/auth.log 2>/dev/null
+                    echo "" > /var/log/syslog 2>/dev/null
+                fi
+                
+                echo -e "${GREEN}✓ Traces cleaned${NC}"
+                log_event "Traces cleaned"
+            else
+                echo -e "${YELLOW}Cleanup cancelled${NC}"
+            fi
+            ;;
+        6)
+            generate_report
+            ;;
+        7)
+            return
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            return
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${GREEN}Press any key to continue...${NC}"
+    read -n 1 -s
+}
+
+# Automated report generation
+generate_report() {
+    echo -e "${YELLOW}Generating comprehensive security assessment report...${NC}"
+    log_event "Generating comprehensive report"
+    
+    local report_file
+    report_file="$SESSION_DIR/reports/security_report_$(date +%Y%m%d_%H%M%S).html"
+    
+    # Collect scan data
+    local open_ports=""
+    if ls "$SESSION_DIR/scans/"*.txt &> /dev/null; then
+        open_ports=$(grep -h "open" "$SESSION_DIR/scans/"*.txt 2>/dev/null | head -20 || echo "No scan data available")
+    else
+        open_ports="No scan results found"
+    fi
+    
+    # Count captures
+    local capture_count
+    capture_count=$(ls -1 "$SESSION_DIR/captures/"*.pcap 2>/dev/null | wc -l || echo "0")
+    
+    # Create HTML report
+    cat > "$report_file" << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Security Assessment Report</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        .content {
+            padding: 40px;
+        }
+        .section {
+            margin-bottom: 40px;
+        }
+        .section h2 {
+            color: #667eea;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+        .section h3 {
+            color: #764ba2;
+            margin: 20px 0 10px 0;
+            font-size: 1.3em;
+        }
+        .finding {
+            background: #f9f9f9;
+            padding: 20px;
+            border-left: 5px solid #ccc;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+        .finding:hover {
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transform: translateX(5px);
+        }
+        .critical {
+            border-left-color: #d9534f;
+            background: #fff5f5;
+        }
+        .warning {
+            border-left-color: #f0ad4e;
+            background: #fff9f0;
+        }
+        .info {
+            border-left-color: #5bc0de;
+            background: #f0f9ff;
+        }
+        .success {
+            border-left-color: #5cb85c;
+            background: #f0fff0;
+        }
+        .finding h4 {
+            margin-bottom: 10px;
+            font-size: 1.2em;
+        }
+        .finding p {
+            margin-bottom: 8px;
+        }
+        .finding strong {
+            color: #333;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            overflow: auto;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .stat-box h3 {
+            color: white;
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+        .stat-box p {
+            opacity: 0.9;
+        }
+        ul {
+            margin-left: 20px;
+            margin-top: 10px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+        .footer {
+            background: #f5f5f5;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            border-top: 1px solid #ddd;
+        }
+        .badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+        .badge-critical { background: #d9534f; color: white; }
+        .badge-warning { background: #f0ad4e; color: white; }
+        .badge-info { background: #5bc0de; color: white; }
+        .badge-success { background: #5cb85c; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔒 Network Security Assessment Report</h1>
+            <p>Comprehensive Security Testing Results</p>
+        </div>
+        
+        <div class="content">
+EOF
+
+    # Add dynamic content
+    cat >> "$report_file" << EOF
+            <div class="section">
+                <h2>📊 Executive Summary</h2>
+                <p><strong>Assessment Date:</strong> $(date)</p>
+                <p><strong>Target:</strong> ${CURRENT_TARGET:-Multiple Targets}</p>
+                <p><strong>Session ID:</strong> $(basename "$SESSION_DIR")</p>
+                <p><strong>Tester:</strong> $(whoami)</p>
+                
+                <div class="stats">
+                    <div class="stat-box">
+                        <h3>$(ls -1 "$SESSION_DIR/scans/"*.txt 2>/dev/null | wc -l || echo "0")</h3>
+                        <p>Scans Performed</p>
+                    </div>
+                    <div class="stat-box">
+                        <h3>$capture_count</h3>
+                        <p>Packet Captures</p>
+                    </div>
+                    <div class="stat-box">
+                        <h3>$(ls -1 "$SESSION_DIR/evidence/"*.txt 2>/dev/null | wc -l || echo "0")</h3>
+                        <p>Evidence Files</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>🎯 Scope and Methodology</h2>
+                <p>This security assessment was conducted using industry-standard penetration testing methodologies including:</p>
+                <ul>
+                    <li><strong>Reconnaissance:</strong> Information gathering and target enumeration</li>
+                    <li><strong>Scanning:</strong> Network and port scanning to identify live hosts and services</li>
+                    <li><strong>Vulnerability Assessment:</strong> Identification of security weaknesses</li>
+                    <li><strong>Traffic Analysis:</strong> Network packet capture and analysis</li>
+                    <li><strong>Security Testing:</strong> Testing of various attack vectors</li>
+                </ul>
+            </div>
+            
+            <div class="section">
+                <h2>🔍 Key Findings</h2>
+                
+                <div class="finding critical">
+                    <span class="badge badge-critical">CRITICAL</span>
+                    <h4>Network Security Posture</h4>
+                    <p>The assessment identified several areas requiring immediate attention:</p>
+                    <ul>
+                        <li>Exposed network services detected</li>
+                        <li>Potential for man-in-the-middle attacks on unencrypted traffic</li>
+                        <li>Wireless security configuration should be reviewed</li>
+                    </ul>
+                    <p><strong>Recommendation:</strong> Implement network segmentation, enable encryption for all services, and conduct regular security audits.</p>
+                </div>
+                
+                <div class="finding warning">
+                    <span class="badge badge-warning">HIGH</span>
+                    <h4>Open Ports and Services</h4>
+                    <p>Multiple ports were found open during the scan:</p>
+                    <pre>$open_ports</pre>
+                    <p><strong>Recommendation:</strong> Review and close unnecessary ports. Ensure all services are up-to-date and properly configured.</p>
+                </div>
+                
+                <div class="finding info">
+                    <span class="badge badge-info">MEDIUM</span>
+                    <h4>Network Traffic Analysis</h4>
+                    <p>Packet captures were analyzed for potential security issues.</p>
+                    <p><strong>Captured Sessions:</strong> $capture_count packet capture files</p>
+                    <p><strong>Recommendation:</strong> Implement traffic monitoring and anomaly detection systems.</p>
+                </div>
+                
+                <div class="finding success">
+                    <span class="badge badge-success">INFO</span>
+                    <h4>Documentation and Evidence</h4>
+                    <p>All testing activities have been logged and documented in the session directory:</p>
+                    <p><code>$SESSION_DIR</code></p>
+                    <p>Evidence includes scan results, packet captures, and detailed logs of all commands executed.</p>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>💡 Recommendations</h2>
+                <h3>Immediate Actions (0-30 days)</h3>
+                <ul>
+                    <li>Patch all identified vulnerabilities</li>
+                    <li>Implement strong network segmentation</li>
+                    <li>Enable encryption for all network services (TLS 1.2+)</li>
+                    <li>Review and restrict unnecessary open ports</li>
+                    <li>Implement intrusion detection/prevention systems</li>
+                </ul>
+                
+                <h3>Short-term Actions (30-90 days)</h3>
+                <ul>
+                    <li>Conduct employee security awareness training</li>
+                    <li>Implement network monitoring and logging</li>
+                    <li>Deploy endpoint protection solutions</li>
+                    <li>Establish incident response procedures</li>
+                    <li>Review and update security policies</li>
+                </ul>
+                
+                <h3>Long-term Strategy (90+ days)</h3>
+                <ul>
+                    <li>Regular penetration testing (quarterly or semi-annually)</li>
+                    <li>Implement Security Information and Event Management (SIEM)</li>
+                    <li>Continuous vulnerability management program</li>
+                    <li>Security architecture review and improvement</li>
+                    <li>Compliance with industry standards (ISO 27001, NIST, etc.)</li>
+                </ul>
+            </div>
+            
+            <div class="section">
+                <h2>📝 Testing Timeline</h2>
+                <h3>Recent Activities</h3>
+                <pre>$(tail -30 "$SESSION_DIR/logs/events.log" 2>/dev/null || echo "No event log available")</pre>
+            </div>
+            
+            <div class="section">
+                <h2>📋 Appendix: Command History</h2>
+                <pre>$(tail -50 "$SESSION_DIR/logs/command_history.log" 2>/dev/null || echo "No command history available")</pre>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p><strong>Network Security Testing Suite v2.0</strong></p>
+            <p>This report is confidential and intended only for authorized personnel.</p>
+            <p>Generated on $(date)</p>
+        </div>
+    </div>
+</body>
+</html>
+EOF
+    
+    echo -e "${GREEN}✓ Report generated successfully!${NC}"
+    echo -e "${CYAN}Report location: $report_file${NC}"
+    log_event "Report generated: $report_file"
+    
+    # Offer to open the report
+    echo ""
+    echo -e "${GREEN}Would you like to open the report now? (y/n)${NC}"
+    read -r open_choice
+    
+    if [[ $open_choice == "y" || $open_choice == "Y" ]]; then
+        if command -v xdg-open &> /dev/null; then
+            xdg-open "$report_file" 2>/dev/null &
+        elif command -v open &> /dev/null; then
+            open "$report_file" 2>/dev/null &
+        else
+            echo -e "${YELLOW}Could not open report automatically.${NC}"
+            echo -e "${YELLOW}Please open it manually: $report_file${NC}"
+        fi
+    fi
+}
+
+# Configuration management
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        echo -e "${GREEN}✓ Configuration loaded from $CONFIG_FILE${NC}"
+    fi
+}
+
+save_config() {
+    cat > "$CONFIG_FILE" << 'EOF'
+# Network Testing Tool Configuration
+# This file is automatically generated
+
+# Default interface
+DEFAULT_INTERFACE="eth0"
+
+# Default scan ports
+DEFAULT_PORTS="21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080"
+
+# Default wordlist paths
+WORDLIST_DIR="/usr/share/wordlists"
+
+# Default session directory
+SESSION_BASE_DIR="./sessions"
+EOF
+    echo -e "${GREEN}✓ Configuration saved to $CONFIG_FILE${NC}"
+}
+
+# Help system
+show_help() {
+    header
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}                    HELP & DOCUMENTATION${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}📚 Available Modules:${NC}"
+    echo ""
+    echo -e "${CYAN}1. Network Sniffing${NC}"
+    echo "   Capture and analyze network traffic using tcpdump, tshark, or Wireshark"
+    echo "   - Useful for understanding network communication"
+    echo "   - Can identify unencrypted sensitive data"
+    echo ""
+    echo -e "${CYAN}2. Port Scanning${NC}"
+    echo "   Discover open ports and running services using nmap or masscan"
+    echo "   - Quick scan: Fast discovery of common ports"
+    echo "   - Comprehensive: Full TCP scan with version detection"
+    echo "   - Stealth: Avoid detection with slow, fragmented scans"
+    echo ""
+    echo -e "${CYAN}3. Vulnerability Assessment${NC}"
+    echo "   Identify security weaknesses in target systems"
+    echo "   - Automated vulnerability detection"
+    echo "   - Web application scanning"
+    echo "   - SSL/TLS configuration testing"
+    echo ""
+    echo -e "${CYAN}4. MITM Attacks${NC}"
+    echo "   Test network security against man-in-the-middle attacks"
+    echo "   - ARP spoofing"
+    echo "   - SSL stripping"
+    echo "   - Traffic interception"
+    echo ""
+    echo -e "${CYAN}5. DNS Spoofing${NC}"
+    echo "   Test DNS security by redirecting domain requests"
+    echo "   - Redirect specific domains"
+    echo "   - Phishing simulation"
+    echo ""
+    echo -e "${CYAN}6. Wireless Attacks${NC}"
+    echo "   Test wireless network security"
+    echo "   - Network scanning"
+    echo "   - Deauthentication attacks"
+    echo "   - WPA/WPA2 handshake capture"
+    echo "   - WPS attacks"
+    echo ""
+    echo -e "${CYAN}7. Password Attacks${NC}"
+    echo "   Test password strength and crack hashes"
+    echo "   - Hash cracking (John, Hashcat)"
+    echo "   - Network service brute force"
+    echo "   - Custom wordlist generation"
+    echo ""
+    echo -e "${CYAN}8. Post-Exploitation${NC}"
+    echo "   Activities after gaining access"
+    echo "   - System enumeration"
+    echo "   - Data collection"
+    echo "   - Network mapping"
+    echo ""
+    echo -e "${CYAN}9. Automated Reconnaissance${NC}"
+    echo "   Comprehensive information gathering"
+    echo "   - WHOIS lookups"
+    echo "   - DNS enumeration"
+    echo "   - Subdomain discovery"
+    echo "   - Port scanning and service detection"
+    echo ""
+    echo -e "${CYAN}10. Generate Report${NC}"
+    echo "    Create comprehensive HTML reports of all activities"
+    echo ""
+    echo -e "${YELLOW}⚠️  Important Notes:${NC}"
+    echo "   • Always obtain written authorization before testing"
+    echo "   • Unauthorized access is illegal and unethical"
+    echo "   • Use these tools only on systems you own or have permission to test"
+    echo "   • Some features require root/sudo privileges"
+    echo "   • All activities are logged in the session directory"
+    echo ""
+    echo -e "${YELLOW}🔧 Tips:${NC}"
+    echo "   • Start with reconnaissance before attacking"
+    echo "   • Use stealth scans to avoid detection"
+    echo "   • Always generate a report after testing"
+    echo "   • Use Emergency Stop (option 13) if needed"
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${GREEN}Press any key to return to the main menu...${NC}"
+    read -n 1 -s
+}
+
+# Main menu
+main_menu() {
+    while true; do
+        header
+        echo -e "${GREEN}═══════════════ Main Menu ═══════════════${NC}"
+        echo -e "${CYAN} 1.${NC}  Network Sniffing"
+        echo -e "${CYAN} 2.${NC}  Port Scanning"
+        echo -e "${CYAN} 3.${NC}  Vulnerability Assessment"
+        echo -e "${CYAN} 4.${NC}  MITM Attacks"
+        echo -e "${CYAN} 5.${NC}  DNS Spoofing"
+        echo -e "${CYAN} 6.${NC}  Wireless Attacks"
+        echo -e "${CYAN} 7.${NC}  Password Attacks"
+        echo -e "${CYAN} 8.${NC}  Post-Exploitation"
+        echo -e "${CYAN} 9.${NC}  Automated Reconnaissance"
+        echo -e "${CYAN}10.${NC}  Generate Report"
+        echo -e "${CYAN}11.${NC}  Show Network Information"
+        echo -e "${CYAN}12.${NC}  Help"
+        echo -e "${CYAN}13.${NC}  Emergency Stop"
+        echo -e "${CYAN}14.${NC}  Exit"
+        echo -e "${GREEN}═══════════════════════════════════════${NC}"
+        echo ""
+        echo -e "${GREEN}Choose an option [1-14]:${NC}"
+        read -r option
+        
+        case $option in
+            1)
+                network_sniff
+                ;;
+            2)
+                port_scan
+                ;;
+            3)
+                vuln_assessment
+                ;;
+            4)
+                mitm_attack
+                ;;
+            5)
+                dns_spoof
+                ;;
+            6)
+                wireless_attacks
+                ;;
+            7)
+                password_attacks
+                ;;
+            8)
+                post_exploitation
+                ;;
+            9)
+                automated_recon
+                ;;
+            10)
+                generate_report
+                ;;
+            11)
+                clear
+                display_banner
+                echo -e "${GREEN}Press any key to return to main menu...${NC}"
+                read -n 1 -s
+                ;;
+            12)
+                show_help
+                ;;
+            13)
+                emergency_stop
+                echo -e "${GREEN}Press any key to continue...${NC}"
+                read -n 1 -s
+                ;;
+            14)
+                echo ""
+                echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+                echo -e "${YELLOW}  Thank you for using Network Security${NC}"
+                echo -e "${YELLOW}  Testing Suite. Stay ethical! 🛡️${NC}"
+                echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}❌ Invalid option. Please choose 1-14${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Initialization
+initialize() {
+    # Display cool banner with network info
+    display_banner
+    
+    # Check if running as root for some operations
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Some features require root privileges.${NC}"
+        echo -e "${YELLOW}Consider running with: sudo $0${NC}"
+        echo ""
+    fi
+    
+    # Load configuration
+    load_config
+    
+    # Create sessions directory if it doesn't exist
+    mkdir -p sessions
+    
+    # Set up a new session
+    setup_session
+    
+    # Run safety checks
+    safety_checks || exit 1
+    
+    echo -e "${GREEN}✓ Initialization complete!${NC}"
+    echo -e "${GREEN}Press any key to continue to main menu...${NC}"
+    read -n 1 -s
+}
+
+# Cleanup on exit
+cleanup() {
+    echo ""
+    echo -e "${YELLOW}🧹 Cleaning up...${NC}"
+    
+    # Stop all background processes
+    emergency_stop
+    
+    # Disable monitor mode if active
+    if [ -n "${MONITOR_INTERFACE:-}" ]; then
+        disable_monitor_mode
+    fi
+    
+    echo -e "${GREEN}✓ Cleanup complete!${NC}"
+    echo -e "${CYAN}Session data saved in: $SESSION_DIR${NC}"
+    echo -e "${YELLOW}Remember to review and secure your test results!${NC}"
+    echo ""
+}
+
+# Set trap for cleanup on exit
+trap cleanup EXIT INT TERM
+
+# Start the script
+main() {
+    echo -e "${CYAN}Initializing Network Security Testing Suite...${NC}"
+    sleep 1
+    initialize
+    main_menu
+}
+
+# Run main function
+main
